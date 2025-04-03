@@ -43,6 +43,18 @@ export const chatService = {
     return messages[sessionId] || [];
   },
 
+  getMessageById: async (messageId: string): Promise<ChatMessage | null> => {
+    // Search through all sessions for the message with the given ID
+    for (const sessionId in messages) {
+      const sessionMessages = messages[sessionId];
+      const message = sessionMessages.find((msg) => msg.id === messageId);
+      if (message) {
+        return message;
+      }
+    }
+    return null;
+  },
+
   sendMessage: async (
     sessionId: string,
     content: string,
