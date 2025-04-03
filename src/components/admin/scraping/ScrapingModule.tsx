@@ -33,6 +33,9 @@ import {
   MonitorSmartphone,
   HardDrive,
   BarChart3,
+  Brain,
+  Sparkles,
+  Wand2,
 } from "lucide-react";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
@@ -74,10 +77,20 @@ import WebPreview from "./WebPreview";
 import URLManager from "./URLManager";
 import DatabaseConfigPanel from "./DatabaseConfigPanel";
 import SelectorTool from "./SelectorTool";
+import AdvancedScrapingOptions, {
+  AdvancedScrapingConfig,
+} from "./AdvancedScrapingOptions";
+import TextProcessingOptions, {
+  TextProcessingConfig,
+} from "./TextProcessingOptions";
+import ExportOptionsPanel, { ExportConfig } from "./ExportOptionsPanel";
+import AIAnalysisPanel from "./AIAnalysisPanel";
 import {
   SelectorConfig,
   ScrapingResult,
   DatabaseConfig,
+  ScrapeOptions,
+  ScrapeResult,
 } from "@/services/scrapingService";
 import scrapingService from "@/services/scrapingService";
 
@@ -150,6 +163,55 @@ const ScrapingModule: React.FC = () => {
   const [selectedSelectorForTest, setSelectedSelectorForTest] = useState<
     string | null
   >(null);
+
+  // Advanced scraping configuration state
+  const [advancedScrapingConfig, setAdvancedScrapingConfig] =
+    useState<AdvancedScrapingConfig>({
+      skipHeadersFooters: false,
+      skipMedia: false,
+      waitForDynamicContent: false,
+      respectRobotsTxt: true,
+      handlePagination: false,
+      paginationSelector: "",
+      maxPages: 5,
+      stealthMode: false,
+      enableProxy: false,
+      proxyUrl: "",
+      rateLimitDelay: 1000,
+      maxRetries: 3,
+      followRedirects: true,
+    });
+
+  // Text processing configuration state
+  const [textProcessingConfig, setTextProcessingConfig] =
+    useState<TextProcessingConfig>({
+      enabled: false,
+      cleaningLevel: "basic",
+      extractStructuredData: false,
+      performSentimentAnalysis: false,
+      extractEntities: false,
+      generateSummary: false,
+      extractKeywords: false,
+      categorizeContent: false,
+    });
+
+  // Export configuration state
+  const [exportConfig, setExportConfig] = useState<ExportConfig>({
+    format: "json",
+    includeMetadata: true,
+    useSemanticKeys: false,
+    extractLinks: false,
+    extractImages: false,
+    extractTables: false,
+    saveToPublic: false,
+    overwriteExisting: false,
+    customFilename: "",
+  });
+
+  // AI analysis state
+  const [aiAnalysis, setAiAnalysis] = useState<any>(null);
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [activeJobId, setActiveJobId] = useState<string | null>(null);
 
   const iframeRef = useRef<HTMLIFrameElement>(null);
 
@@ -545,6 +607,108 @@ const ScrapingModule: React.FC = () => {
     }
   };
 
+  // Run AI analysis on the scraped content
+  const runAIAnalysis = async () => {
+    if (results.length === 0) {
+      toast({
+        title: "No Results",
+        description: "There are no results to analyze.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    try {
+      setIsAnalyzing(true);
+
+      // Start a new scraping job with AI processing
+      const jobId = await scrapingService.startScraping({
+        url: results[0].url,
+        includeHeader: !advancedScrapingConfig.skipHeadersFooters,
+        includeFooter: !advancedScrapingConfig.skipHeadersFooters,
+        scrapeFullPage: true,
+        scrapeImages: !advancedScrapingConfig.skipMedia,
+        scrapeVideos: !advancedScrapingConfig.skipMedia,
+        scrapeText: true,
+        handleDynamicContent: advancedScrapingConfig.waitForDynamicContent,
+        skipHeadersFooters: advancedScrapingConfig.skipHeadersFooters,
+        skipMedia: advancedScrapingConfig.skipMedia,
+        waitForDynamicContent: advancedScrapingConfig.waitForDynamicContent,
+        respectRobotsTxt: advancedScrapingConfig.respectRobotsTxt,
+        stealthMode: advancedScrapingConfig.stealthMode,
+        pagination: advancedScrapingConfig.handlePagination
+          ? {
+              enabled: true,
+              nextButtonSelector: advancedScrapingConfig.paginationSelector,
+              maxPages: advancedScrapingConfig.maxPages,
+            }
+          : undefined,
+        securityOptions: {
+          enableProxy: advancedScrapingConfig.enableProxy,
+          proxyUrl: advancedScrapingConfig.proxyUrl,
+          rateLimitDelay: advancedScrapingConfig.rateLimitDelay,
+          maxRetries: advancedScrapingConfig.maxRetries,
+          followRedirects: advancedScrapingConfig.followRedirects,
+        },
+        aiOptions: {
+          enabled: true,
+          cleaningLevel: textProcessingConfig.cleaningLevel,
+          extractStructuredData: textProcessingConfig.extractStructuredData,
+          performSentimentAnalysis:
+            textProcessingConfig.performSentimentAnalysis,
+          extractEntities: textProcessingConfig.extractEntities,
+          generateSummary: textProcessingConfig.generateSummary,
+          extractKeywords: textProcessingConfig.extractKeywords,
+          categorizeContent: textProcessingConfig.categorizeContent,
+        },
+      });
+
+      setActiveJobId(jobId);
+
+      // Poll for job status
+      const pollInterval = setInterval(async () => {
+        try {
+          const jobStatus = scrapingService.getJobStatus(jobId);
+          if (jobStatus) {
+            if (jobStatus.status === "completed") {
+              clearInterval(pollInterval);
+              setAiAnalysis(jobStatus.aiAnalysis);
+              setIsAnalyzing(false);
+              setActiveJobId(null);
+
+              toast({
+                title: "AI Analysis Complete",
+                description:
+                  "AI has successfully analyzed the scraped content.",
+              });
+            } else if (jobStatus.status === "failed") {
+              clearInterval(pollInterval);
+              setIsAnalyzing(false);
+              setActiveJobId(null);
+
+              toast({
+                title: "AI Analysis Failed",
+                description: jobStatus.error || "An unknown error occurred",
+                variant: "destructive",
+              });
+            }
+          }
+        } catch (error) {
+          console.error("Error polling job status:", error);
+        }
+      }, 1000);
+    } catch (error) {
+      console.error("Error running AI analysis:", error);
+      setIsAnalyzing(false);
+
+      toast({
+        title: "AI Analysis Failed",
+        description: error.message || "An unknown error occurred",
+        variant: "destructive",
+      });
+    }
+  };
+
   // Start scraping
   const startScraping = async () => {
     // Validate inputs
@@ -571,6 +735,7 @@ const ScrapingModule: React.FC = () => {
       setIsLoading(true);
       setResults([]);
       setScrapingProgress(0);
+      setAiAnalysis(null);
 
       // Parse request headers if provided
       let headers = {};
@@ -634,6 +799,41 @@ const ScrapingModule: React.FC = () => {
             width: previewWidth,
             height: previewHeight,
           },
+          // Add advanced scraping options
+          skipHeadersFooters: advancedScrapingConfig.skipHeadersFooters,
+          skipMedia: advancedScrapingConfig.skipMedia,
+          waitForDynamicContent: advancedScrapingConfig.waitForDynamicContent,
+          respectRobotsTxt: advancedScrapingConfig.respectRobotsTxt,
+          stealthMode: advancedScrapingConfig.stealthMode,
+          pagination: advancedScrapingConfig.handlePagination
+            ? {
+                enabled: true,
+                nextButtonSelector: advancedScrapingConfig.paginationSelector,
+                maxPages: advancedScrapingConfig.maxPages,
+              }
+            : undefined,
+          securityOptions: {
+            enableProxy: advancedScrapingConfig.enableProxy,
+            proxyUrl: advancedScrapingConfig.proxyUrl,
+            rateLimitDelay: advancedScrapingConfig.rateLimitDelay,
+            maxRetries: advancedScrapingConfig.maxRetries,
+            followRedirects: advancedScrapingConfig.followRedirects,
+          },
+          // Add text processing options
+          aiOptions: textProcessingConfig.enabled
+            ? {
+                enabled: true,
+                cleaningLevel: textProcessingConfig.cleaningLevel,
+                extractStructuredData:
+                  textProcessingConfig.extractStructuredData,
+                performSentimentAnalysis:
+                  textProcessingConfig.performSentimentAnalysis,
+                extractEntities: textProcessingConfig.extractEntities,
+                generateSummary: textProcessingConfig.generateSummary,
+                extractKeywords: textProcessingConfig.extractKeywords,
+                categorizeContent: textProcessingConfig.categorizeContent,
+              }
+            : undefined,
         },
       }));
 
@@ -679,6 +879,11 @@ const ScrapingModule: React.FC = () => {
 
       // Switch to results tab
       setActiveTab("results");
+
+      // If AI processing is enabled, run it automatically
+      if (textProcessingConfig.enabled && scrapingResults.length > 0) {
+        runAIAnalysis();
+      }
     } catch (error) {
       console.error("Scraping error:", error);
       toast({
@@ -709,13 +914,15 @@ const ScrapingModule: React.FC = () => {
       setIsLoading(true);
 
       // Generate filename
-      const filename = `scraping_results_${new Date().toISOString().replace(/[:.]/g, "-")}`;
+      const filename =
+        exportConfig.customFilename ||
+        `scraping_results_${new Date().toISOString().replace(/[:.]/g, "-")}`;
 
       // Call the API to save the results to a file
       const filePath = await scrapingService.saveToFile(
         results,
         filename,
-        exportFormat as any,
+        exportConfig.format,
       );
 
       toast({
@@ -802,6 +1009,7 @@ const ScrapingModule: React.FC = () => {
     },
     { value: "results", label: "Results", icon: <BarChart3 size={16} /> },
     { value: "storage", label: "Storage", icon: <HardDrive size={16} /> },
+    { value: "options", label: "Options", icon: <Settings size={16} /> },
   ];
 
   return (
@@ -1376,36 +1584,26 @@ const ScrapingModule: React.FC = () => {
                           <EmptyState
                             icon={<ListFilter size={40} />}
                             title="No Selectors Configured"
-                            description="Add selectors to extract specific data from web pages. You can select elements visually from the preview."
-                            actionLabel="Add Selector"
-                            onAction={createNewSelector}
+                            description="Add selectors to extract specific data from web pages. You can select elements visually from the preview"
                           />
                         ) : (
-                          <div className="space-y-3">
+                          <div className="space-y-2">
                             {selectors.map((selector) => (
                               <SelectorCard
                                 key={selector.id}
                                 selector={selector}
-                                onEdit={editSelector}
-                                onRemove={removeSelector}
-                                onTest={testSelector}
-                                testResult={testResults[selector.id]}
+                                onEdit={() => editSelector(selector)}
+                                onRemove={() => removeSelector(selector.id)}
+                                onCopy={() => copySelector(selector.selector)}
+                                onTest={() => testSelector(selector.id)}
+                                isCopied={copiedSelector === selector.selector}
                                 isTesting={
                                   selectedSelectorForTest === selector.id
                                 }
+                                testResult={testResults[selector.id]}
                               />
                             ))}
                           </div>
-                        )}
-
-                        {showSelectorTool && (
-                          <SelectorTool
-                            iframeRef={iframeRef}
-                            onSelectorCreated={addSelector}
-                            onClose={() => setShowSelectorTool(false)}
-                            position={selectorToolPosition}
-                            size={{ width: 400, height: 500 }}
-                          />
                         )}
                       </div>
                     )}
@@ -1413,11 +1611,81 @@ const ScrapingModule: React.FC = () => {
                     {/* Preview Tab */}
                     {activeTab === "preview" && (
                       <div className="space-y-4">
-                        <WebPreview
-                          url={activeUrl}
-                          onSelectorCreated={addSelector}
-                          mode={previewMode}
-                        />
+                        {activeUrl ? (
+                          <>
+                            <div className="flex justify-between items-center">
+                              <h3 className="text-lg font-medium">
+                                Preview: {activeUrl}
+                              </h3>
+                              <div className="flex gap-2">
+                                <Button
+                                  variant="outline"
+                                  size="sm"
+                                  onClick={() =>
+                                    setPreviewMode(
+                                      previewMode === "visual"
+                                        ? "code"
+                                        : "visual",
+                                    )
+                                  }
+                                >
+                                  {previewMode === "visual" ? (
+                                    <>
+                                      <Code size={16} className="mr-1" />
+                                      View Code
+                                    </>
+                                  ) : (
+                                    <>
+                                      <Eye size={16} className="mr-1" />
+                                      View Visual
+                                    </>
+                                  )}
+                                </Button>
+                                <Button
+                                  variant="outline"
+                                  size="sm"
+                                  onClick={() => createNewSelector()}
+                                >
+                                  <Plus size={16} className="mr-1" />
+                                  Add Selector
+                                </Button>
+                              </div>
+                            </div>
+
+                            <WebPreview
+                              url={activeUrl}
+                              mode={previewMode}
+                              height={previewHeight}
+                              width={previewWidth}
+                              device={previewDevice}
+                              onSelectElement={(selector) => {
+                                // Handle element selection
+                                const newSelector = {
+                                  id: `selector_${Date.now()}`,
+                                  name: `Selected Element ${selectors.length + 1}`,
+                                  selector,
+                                  type: "text",
+                                };
+                                addSelector(newSelector);
+                              }}
+                              iframeRef={iframeRef}
+                            />
+                          </>
+                        ) : (
+                          <EmptyState
+                            icon={<Globe size={40} />}
+                            title="No URL Selected"
+                            description="Select a URL from the URLs tab to preview it here"
+                            action={
+                              <Button
+                                onClick={() => setActiveTab("urls")}
+                                variant="outline"
+                              >
+                                Go to URLs
+                              </Button>
+                            }
+                          />
+                        )}
                       </div>
                     )}
 
@@ -1429,48 +1697,157 @@ const ScrapingModule: React.FC = () => {
                             Scraping Results
                           </h3>
                           <div className="flex gap-2">
-                            {results.length > 0 && (
-                              <>
-                                <Button
-                                  variant="outline"
-                                  size="sm"
-                                  onClick={saveResultsToDatabase}
-                                  disabled={isLoading || !dbConfig}
-                                >
-                                  <Database size={16} className="mr-1" />
-                                  Save to DB
-                                </Button>
-                                <Button
-                                  variant="outline"
-                                  size="sm"
-                                  onClick={saveResultsToFile}
-                                  disabled={isLoading}
-                                >
-                                  <Download size={16} className="mr-1" />
-                                  Export
-                                </Button>
-                              </>
-                            )}
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={saveResultsToFile}
+                              disabled={isLoading || results.length === 0}
+                            >
+                              <Download size={16} className="mr-1" />
+                              Save to File
+                            </Button>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={saveResultsToDatabase}
+                              disabled={
+                                isLoading || results.length === 0 || !dbConfig
+                              }
+                            >
+                              <Database size={16} className="mr-1" />
+                              Save to Database
+                            </Button>
                           </div>
                         </div>
 
                         {results.length === 0 ? (
                           <EmptyState
-                            icon={<BarChart3 size={40} />}
+                            icon={<AlertCircle size={40} />}
                             title="No Results Yet"
-                            description="Run the scraper to see results here. Configure your URLs and selectors, then click 'Start Scraping'."
-                            actionLabel="Start Scraping"
-                            onAction={startScraping}
+                            description="Run a scraping job to see results here"
+                            action={
+                              <Button
+                                onClick={() => setActiveTab("urls")}
+                                variant="outline"
+                              >
+                                Go to URLs
+                              </Button>
+                            }
                           />
                         ) : (
-                          <div className="space-y-3">
-                            {results.map((result, index) => (
-                              <ResultCard
-                                key={index}
-                                result={result}
-                                onExport={() => saveResultsToFile()}
-                              />
-                            ))}
+                          <div className="space-y-4">
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                              <div>
+                                <h4 className="text-sm font-medium mb-2">
+                                  Results Summary
+                                </h4>
+                                <div className="bg-muted p-3 rounded-md">
+                                  <div className="grid grid-cols-2 gap-2 text-sm">
+                                    <div>Total URLs:</div>
+                                    <div className="font-medium">
+                                      {results.length}
+                                    </div>
+                                    <div>Successful:</div>
+                                    <div className="font-medium">
+                                      {results.filter((r) => r.success).length}
+                                    </div>
+                                    <div>Failed:</div>
+                                    <div className="font-medium">
+                                      {results.filter((r) => !r.success).length}
+                                    </div>
+                                    <div>Timestamp:</div>
+                                    <div className="font-medium">
+                                      {results[0]?.timestamp
+                                        ? new Date(
+                                            results[0].timestamp,
+                                          ).toLocaleString()
+                                        : "N/A"}
+                                    </div>
+                                  </div>
+                                </div>
+                              </div>
+
+                              {/* AI Analysis Button */}
+                              <div>
+                                <h4 className="text-sm font-medium mb-2">
+                                  AI Analysis
+                                </h4>
+                                <div className="bg-muted p-3 rounded-md flex items-center justify-between">
+                                  <div className="text-sm">
+                                    {aiAnalysis ? (
+                                      <span className="text-green-600 flex items-center">
+                                        <Check size={16} className="mr-1" />
+                                        Analysis Complete
+                                      </span>
+                                    ) : (
+                                      <span>
+                                        Run AI analysis on scraped content
+                                      </span>
+                                    )}
+                                  </div>
+                                  <Button
+                                    variant="outline"
+                                    size="sm"
+                                    onClick={runAIAnalysis}
+                                    disabled={
+                                      isAnalyzing || results.length === 0
+                                    }
+                                  >
+                                    {isAnalyzing ? (
+                                      <>
+                                        <Loader2
+                                          size={16}
+                                          className="mr-1 animate-spin"
+                                        />
+                                        Analyzing...
+                                      </>
+                                    ) : (
+                                      <>
+                                        <Brain size={16} className="mr-1" />
+                                        {aiAnalysis ? "Re-analyze" : "Analyze"}
+                                      </>
+                                    )}
+                                  </Button>
+                                </div>
+                              </div>
+                            </div>
+
+                            {/* AI Analysis Panel */}
+                            {(aiAnalysis || isAnalyzing) && (
+                              <div className="mt-4">
+                                <AIAnalysisPanel
+                                  result={results[0]}
+                                  onAnalyze={runAIAnalysis}
+                                  isAnalyzing={isAnalyzing}
+                                  aiAnalysis={aiAnalysis}
+                                />
+                              </div>
+                            )}
+
+                            <div className="mt-4">
+                              <h4 className="text-sm font-medium mb-2">
+                                Detailed Results
+                              </h4>
+                              <div className="space-y-3">
+                                {results.map((result, index) => (
+                                  <ResultCard
+                                    key={`${result.url}_${index}`}
+                                    result={result}
+                                    onExport={() => {
+                                      // Handle individual result export
+                                      navigator.clipboard.writeText(
+                                        JSON.stringify(result, null, 2),
+                                      );
+                                      toast({
+                                        title: "Copied to Clipboard",
+                                        description:
+                                          "Result data copied to clipboard",
+                                      });
+                                    }}
+                                  />
+                                ))}
+                              </div>
+                            </div>
                           </div>
                         )}
                       </div>
@@ -1479,98 +1856,224 @@ const ScrapingModule: React.FC = () => {
                     {/* Storage Tab */}
                     {activeTab === "storage" && (
                       <div className="space-y-4">
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                          <Card>
-                            <CardHeader>
-                              <CardTitle className="text-lg">
-                                Database Configuration
-                              </CardTitle>
-                              <CardDescription>
-                                Configure database settings for storing scraped
-                                data
-                              </CardDescription>
-                            </CardHeader>
-                            <CardContent>
-                              <DatabaseConfigPanel
-                                selectors={selectors}
-                                onSaveConfig={handleDbConfigSave}
-                              />
-                            </CardContent>
-                          </Card>
+                        <div className="flex justify-between items-center">
+                          <h3 className="text-lg font-medium">
+                            Storage Configuration
+                          </h3>
+                        </div>
 
-                          <Card>
-                            <CardHeader>
-                              <CardTitle className="text-lg">
-                                Export Options
-                              </CardTitle>
-                              <CardDescription>
-                                Configure how to export scraped data to files
-                              </CardDescription>
-                            </CardHeader>
-                            <CardContent>
-                              <div className="space-y-4">
-                                <div className="grid grid-cols-2 gap-4">
-                                  <div
-                                    className="flex flex-col items-center gap-2 p-4 border rounded-md cursor-pointer hover:bg-gray-50 transition-colors"
-                                    onClick={() => setExportFormat("json")}
-                                  >
-                                    <div
-                                      className={`p-2 rounded-full ${exportFormat === "json" ? "bg-primary/10 text-primary" : "bg-gray-100 text-gray-500"}`}
-                                    >
-                                      <FileJson size={24} />
+                        <Tabs defaultValue="file">
+                          <TabsList>
+                            <TabsTrigger value="file">
+                              <FileJson size={16} className="mr-1" />
+                              File Storage
+                            </TabsTrigger>
+                            <TabsTrigger value="database">
+                              <Database size={16} className="mr-1" />
+                              Database Storage
+                            </TabsTrigger>
+                          </TabsList>
+                          <TabsContent value="file" className="mt-4">
+                            <Card>
+                              <CardHeader>
+                                <CardTitle className="text-lg">
+                                  File Export Settings
+                                </CardTitle>
+                                <CardDescription>
+                                  Configure how data is exported to files
+                                </CardDescription>
+                              </CardHeader>
+                              <CardContent>
+                                <div className="space-y-4">
+                                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                    <div className="space-y-2">
+                                      <Label htmlFor="export-format">
+                                        Export Format
+                                      </Label>
+                                      <Select
+                                        value={exportFormat}
+                                        onValueChange={setExportFormat}
+                                      >
+                                        <SelectTrigger id="export-format">
+                                          <SelectValue placeholder="Select format" />
+                                        </SelectTrigger>
+                                        <SelectContent>
+                                          <SelectItem value="json">
+                                            JSON
+                                          </SelectItem>
+                                          <SelectItem value="csv">
+                                            CSV
+                                          </SelectItem>
+                                          <SelectItem value="xml">
+                                            XML
+                                          </SelectItem>
+                                          <SelectItem value="excel">
+                                            Excel
+                                          </SelectItem>
+                                        </SelectContent>
+                                      </Select>
                                     </div>
-                                    <span className="font-medium">JSON</span>
-                                    <Badge
-                                      variant={
-                                        exportFormat === "json"
-                                          ? "default"
-                                          : "outline"
-                                      }
-                                      className="text-xs"
-                                    >
-                                      {exportFormat === "json"
-                                        ? "Selected"
-                                        : "Select"}
-                                    </Badge>
+
+                                    <div className="space-y-2">
+                                      <Label htmlFor="output-folder">
+                                        Output Folder
+                                      </Label>
+                                      <Input
+                                        id="output-folder"
+                                        value={outputFolder}
+                                        onChange={(e) =>
+                                          setOutputFolder(e.target.value)
+                                        }
+                                        placeholder="data/scraping"
+                                      />
+                                    </div>
                                   </div>
 
-                                  <div
-                                    className="flex flex-col items-center gap-2 p-4 border rounded-md cursor-pointer hover:bg-gray-50 transition-colors"
-                                    onClick={() => setExportFormat("csv")}
-                                  >
-                                    <div
-                                      className={`p-2 rounded-full ${exportFormat === "csv" ? "bg-primary/10 text-primary" : "bg-gray-100 text-gray-500"}`}
-                                    >
-                                      <Table2 size={24} />
+                                  <div className="space-y-2">
+                                    <Label className="text-base">
+                                      Export Options
+                                    </Label>
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                                      <div className="flex items-center space-x-2">
+                                        <Checkbox
+                                          id="include-metadata"
+                                          checked={exportConfig.includeMetadata}
+                                          onCheckedChange={(checked) =>
+                                            setExportConfig({
+                                              ...exportConfig,
+                                              includeMetadata: !!checked,
+                                            })
+                                          }
+                                        />
+                                        <Label
+                                          htmlFor="include-metadata"
+                                          className="cursor-pointer"
+                                        >
+                                          Include Metadata
+                                        </Label>
+                                      </div>
+
+                                      <div className="flex items-center space-x-2">
+                                        <Checkbox
+                                          id="extract-links"
+                                          checked={exportConfig.extractLinks}
+                                          onCheckedChange={(checked) =>
+                                            setExportConfig({
+                                              ...exportConfig,
+                                              extractLinks: !!checked,
+                                            })
+                                          }
+                                        />
+                                        <Label
+                                          htmlFor="extract-links"
+                                          className="cursor-pointer"
+                                        >
+                                          Extract Links
+                                        </Label>
+                                      </div>
+
+                                      <div className="flex items-center space-x-2">
+                                        <Checkbox
+                                          id="extract-images"
+                                          checked={exportConfig.extractImages}
+                                          onCheckedChange={(checked) =>
+                                            setExportConfig({
+                                              ...exportConfig,
+                                              extractImages: !!checked,
+                                            })
+                                          }
+                                        />
+                                        <Label
+                                          htmlFor="extract-images"
+                                          className="cursor-pointer"
+                                        >
+                                          Extract Images
+                                        </Label>
+                                      </div>
+
+                                      <div className="flex items-center space-x-2">
+                                        <Checkbox
+                                          id="extract-tables"
+                                          checked={exportConfig.extractTables}
+                                          onCheckedChange={(checked) =>
+                                            setExportConfig({
+                                              ...exportConfig,
+                                              extractTables: !!checked,
+                                            })
+                                          }
+                                        />
+                                        <Label
+                                          htmlFor="extract-tables"
+                                          className="cursor-pointer"
+                                        >
+                                          Extract Tables
+                                        </Label>
+                                      </div>
                                     </div>
-                                    <span className="font-medium">CSV</span>
-                                    <Badge
-                                      variant={
-                                        exportFormat === "csv"
-                                          ? "default"
-                                          : "outline"
-                                      }
-                                      className="text-xs"
-                                    >
-                                      {exportFormat === "csv"
-                                        ? "Selected"
-                                        : "Select"}
-                                    </Badge>
                                   </div>
                                 </div>
+                              </CardContent>
+                            </Card>
+                          </TabsContent>
+                          <TabsContent value="database" className="mt-4">
+                            <DatabaseConfigPanel
+                              config={dbConfig}
+                              onSave={handleDbConfigSave}
+                            />
+                          </TabsContent>
+                        </Tabs>
+                      </div>
+                    )}
 
-                                <Button
-                                  onClick={saveResultsToFile}
-                                  disabled={results.length === 0 || isLoading}
-                                  className="w-full"
-                                >
-                                  <Download size={16} className="mr-1" />
-                                  Export Results
-                                </Button>
-                              </div>
-                            </CardContent>
-                          </Card>
+                    {/* Options Tab */}
+                    {activeTab === "options" && (
+                      <div className="space-y-6">
+                        <div className="flex justify-between items-center">
+                          <h3 className="text-lg font-medium">
+                            Advanced Scraping Options
+                          </h3>
                         </div>
+
+                        <Tabs defaultValue="scraping">
+                          <TabsList>
+                            <TabsTrigger value="scraping">
+                              <Settings size={16} className="mr-1" />
+                              Scraping Options
+                            </TabsTrigger>
+                            <TabsTrigger value="processing">
+                              <Wand2 size={16} className="mr-1" />
+                              Text Processing
+                            </TabsTrigger>
+                            <TabsTrigger value="export">
+                              <Download size={16} className="mr-1" />
+                              Export Options
+                            </TabsTrigger>
+                          </TabsList>
+
+                          <TabsContent value="scraping" className="mt-4">
+                            <AdvancedScrapingOptions
+                              config={advancedScrapingConfig}
+                              onChange={setAdvancedScrapingConfig}
+                            />
+                          </TabsContent>
+
+                          <TabsContent value="processing" className="mt-4">
+                            <TextProcessingOptions
+                              config={textProcessingConfig}
+                              onChange={setTextProcessingConfig}
+                            />
+                          </TabsContent>
+
+                          <TabsContent value="export" className="mt-4">
+                            <ExportOptionsPanel
+                              config={exportConfig}
+                              onChange={setExportConfig}
+                              onExport={saveResultsToFile}
+                              isExporting={isLoading}
+                              hasResults={results.length > 0}
+                            />
+                          </TabsContent>
+                        </Tabs>
                       </div>
                     )}
                   </motion.div>
@@ -1580,6 +2083,46 @@ const ScrapingModule: React.FC = () => {
           </CardContent>
         </Card>
       </motion.div>
+
+      {/* Selector Tool Dialog */}
+      {showSelectorTool && (
+        <Dialog open={showSelectorTool} onOpenChange={setShowSelectorTool}>
+          <DialogContent className="max-w-4xl">
+            <DialogHeader>
+              <DialogTitle>Element Selector Tool</DialogTitle>
+              <DialogDescription>
+                Click on elements in the preview to create selectors
+              </DialogDescription>
+            </DialogHeader>
+
+            <div className="h-[500px] overflow-hidden">
+              <SelectorTool
+                url={activeUrl}
+                onSelectElement={(selector, name) => {
+                  const newSelector = {
+                    id: `selector_${Date.now()}`,
+                    name: name || `Selected Element ${selectors.length + 1}`,
+                    selector,
+                    type: "text",
+                  };
+                  addSelector(newSelector);
+                  setShowSelectorTool(false);
+                }}
+                onCancel={() => setShowSelectorTool(false)}
+              />
+            </div>
+
+            <DialogFooter>
+              <Button
+                variant="outline"
+                onClick={() => setShowSelectorTool(false)}
+              >
+                Cancel
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      )}
     </div>
   );
 };

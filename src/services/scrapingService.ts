@@ -70,6 +70,11 @@ export interface ScrapeOptions {
   scrapeVideos: boolean;
   scrapeText: boolean;
   handleDynamicContent: boolean;
+  skipHeadersFooters: boolean;
+  skipMedia: boolean;
+  waitForDynamicContent: boolean;
+  respectRobotsTxt: boolean;
+  stealthMode: boolean;
   maxPages?: number;
   waitTime?: number;
   selector?: string;
@@ -87,16 +92,32 @@ export interface ScrapeOptions {
     maxPages: number;
   };
   aiOptions?: {
+    enabled: boolean;
+    cleaningLevel: "basic" | "thorough" | "semantic";
+    extractStructuredData: boolean;
     performSentimentAnalysis: boolean;
-    performNER: boolean;
+    extractEntities: boolean;
     generateSummary: boolean;
     extractKeywords: boolean;
     categorizeContent: boolean;
   };
   exportOptions?: {
-    format: "json" | "csv" | "xml" | "excel";
+    format: "json" | "csv" | "xml" | "excel" | "text";
+    includeMetadata: boolean;
+    useSemanticKeys: boolean;
+    extractLinks: boolean;
+    extractImages: boolean;
+    extractTables: boolean;
     saveToPublic: boolean;
     overwriteExisting: boolean;
+    customFilename: string;
+  };
+  securityOptions?: {
+    enableProxy: boolean;
+    proxyUrl: string;
+    rateLimitDelay: number;
+    maxRetries: number;
+    followRedirects: boolean;
   };
 }
 
@@ -113,6 +134,8 @@ export interface ScrapeResult {
     videos: string[];
     tables: any[];
     lists: any[];
+    links?: string[];
+    structuredData?: Record<string, any>;
   };
   aiAnalysis?: {
     sentiment?: {
@@ -127,33 +150,126 @@ export interface ScrapeResult {
     summary?: string;
     keywords?: string[];
     categories?: string[];
+    structuredData?: Record<string, any>;
+    cleanedText?: string;
   };
   metadata: {
     pageTitle: string;
     pageDescription: string;
     pageKeywords: string[];
     totalElements: number;
+    statusCode?: number;
+    contentType?: string;
+    responseTime?: number;
+    robotsTxtStatus?: string;
+    removedElements?: {
+      headers?: number;
+      footers?: number;
+      ads?: number;
+      media?: number;
+    };
   };
   exportPath?: string;
+  exportFormat?: string;
 }
 
-// Mock implementation for client-side testing
 class ScrapingService {
   private activeJobs: Map<string, ScrapeResult> = new Map();
+  private batchSize = 5; // Number of URLs to process in parallel
+  private retryLimit = 3; // Number of retries for failed requests
+  private retryDelay = 1000; // Delay between retries in ms
 
   /**
    * Scrapes data from multiple URLs based on provided selectors
+   * Enhanced to process URLs in parallel batches with retry logic
    */
   async scrapeMultipleUrls(
     targets: ScrapingTarget[],
   ): Promise<ScrapingResult[]> {
     try {
-      const response = await axios.post("/api/scraping/scrape", { targets });
-      return response.data;
+      const results: ScrapingResult[] = [];
+
+      // Process URLs in batches to avoid overwhelming the server
+      for (let i = 0; i < targets.length; i += this.batchSize) {
+        const batch = targets.slice(i, i + this.batchSize);
+        const batchPromises = batch.map((target) =>
+          this.scrapeWithRetry(target.url, target.selectors, target.options),
+        );
+
+        // Wait for all promises in the current batch to resolve
+        const batchResults = await Promise.allSettled(batchPromises);
+
+        // Process results, including both fulfilled and rejected promises
+        batchResults.forEach((result, index) => {
+          if (result.status === "fulfilled") {
+            results.push(result.value);
+          } else {
+            // Create an error result for failed requests
+            results.push({
+              url: batch[index].url,
+              timestamp: new Date().toISOString(),
+              data: {},
+              success: false,
+              error: result.reason?.message || "Failed to scrape URL",
+            });
+          }
+        });
+
+        // Add a small delay between batches to avoid rate limiting
+        if (i + this.batchSize < targets.length) {
+          await new Promise((resolve) => setTimeout(resolve, 500));
+        }
+      }
+
+      return results;
     } catch (error) {
       console.error("Error in scrapeMultipleUrls:", error);
       throw new Error(`Failed to scrape multiple URLs: ${error.message}`);
     }
+  }
+
+  /**
+   * Scrapes a single URL with retry logic
+   */
+  private async scrapeWithRetry(
+    url: string,
+    selectors: SelectorConfig[],
+    options?: ScrapingTarget["options"],
+  ): Promise<ScrapingResult> {
+    let attempts = 0;
+    let lastError: any;
+
+    while (attempts < this.retryLimit) {
+      try {
+        const response = await axios.post("/api/scraping/scrape", {
+          targets: [{ url, selectors, options }],
+        });
+        return response.data[0];
+      } catch (error) {
+        lastError = error;
+        attempts++;
+
+        // Wait before retrying
+        if (attempts < this.retryLimit) {
+          await new Promise((resolve) =>
+            setTimeout(resolve, this.retryDelay * attempts),
+          );
+        }
+      }
+    }
+
+    // All retries failed
+    console.error(
+      `Error scraping URL ${url} after ${attempts} attempts:`,
+      lastError,
+    );
+    return {
+      url,
+      timestamp: new Date().toISOString(),
+      data: {},
+      success: false,
+      error: lastError?.message || `Failed after ${attempts} attempts`,
+    };
   }
 
   /**
@@ -164,21 +280,7 @@ class ScrapingService {
     selectors: SelectorConfig[],
     options?: ScrapingTarget["options"],
   ): Promise<ScrapingResult> {
-    try {
-      const response = await axios.post("/api/scraping/scrape", {
-        targets: [{ url, selectors, options }],
-      });
-      return response.data[0];
-    } catch (error) {
-      console.error(`Error scraping URL ${url}:`, error);
-      return {
-        url,
-        timestamp: new Date().toISOString(),
-        data: {},
-        success: false,
-        error: error.message,
-      };
-    }
+    return this.scrapeWithRetry(url, selectors, options);
   }
 
   /**
@@ -226,7 +328,7 @@ class ScrapingService {
    */
   async fetchHtmlPreview(url: string): Promise<string> {
     try {
-      const response = await axios.post("/api/scraping/fetch-html", { url });
+      const response = await axios.post("/api/scraping/fetch", { url });
       return response.data.html;
     } catch (error: any) {
       console.error("Error fetching HTML preview:", error);
@@ -279,46 +381,140 @@ class ScrapingService {
   }
 
   /**
-   * Start a new scraping job
+   * Start a new scraping job with AI processing
    */
   async startScraping(options: ScrapeOptions): Promise<string> {
-    const jobId = Math.random().toString(36).substring(2, 15);
-    const result: ScrapeResult = {
-      id: jobId,
-      url: options.url,
-      timestamp: new Date().toISOString(),
-      status: "in-progress",
-      progress: 0,
-      data: {
-        text: [],
-        images: [],
-        videos: [],
-        tables: [],
-        lists: [],
-      },
-      metadata: {
-        pageTitle: "",
-        pageDescription: "",
-        pageKeywords: [],
-        totalElements: 0,
-      },
-    };
+    try {
+      // Generate a unique job ID
+      const jobId = uuidv4();
 
-    this.activeJobs.set(jobId, result);
+      // Create initial job state
+      const initialState: ScrapeResult = {
+        id: jobId,
+        url: options.url,
+        timestamp: new Date().toISOString(),
+        status: "in-progress",
+        progress: 0,
+        data: {
+          text: [],
+          images: [],
+          videos: [],
+          tables: [],
+          lists: [],
+        },
+        metadata: {
+          pageTitle: "",
+          pageDescription: "",
+          pageKeywords: [],
+          totalElements: 0,
+        },
+      };
 
-    // Simulate processing
-    setTimeout(() => {
+      // Store the job state
+      this.activeJobs.set(jobId, initialState);
+
+      // Start the scraping process asynchronously
+      this.processScraping(jobId, options).catch((error) => {
+        console.error(`Error processing job ${jobId}:`, error);
+        const job = this.activeJobs.get(jobId);
+        if (job) {
+          job.status = "failed";
+          job.error = error.message;
+          this.activeJobs.set(jobId, job);
+        }
+      });
+
+      return jobId;
+    } catch (error) {
+      console.error("Error starting scraping job:", error);
+      throw new Error(`Failed to start scraping job: ${error.message}`);
+    }
+  }
+
+  /**
+   * Process a scraping job with progress tracking
+   */
+  private async processScraping(
+    jobId: string,
+    options: ScrapeOptions,
+  ): Promise<void> {
+    try {
+      // Get the job state
+      const job = this.activeJobs.get(jobId);
+      if (!job) throw new Error(`Job ${jobId} not found`);
+
+      // Update progress
+      job.progress = 10;
+      this.activeJobs.set(jobId, job);
+
+      // Call the API to start the scraping job
+      const response = await axios.post("/api/scraping/start-job", {
+        options,
+        jobId,
+      });
+
+      // Update job with initial results
+      job.progress = 50;
+      job.metadata = {
+        ...job.metadata,
+        ...response.data.metadata,
+      };
+      this.activeJobs.set(jobId, job);
+
+      // If AI processing is enabled, run it
+      if (options.aiOptions?.enabled) {
+        await this.runAIAnalysis(jobId, options.aiOptions);
+      }
+
+      // Mark job as completed
+      job.status = "completed";
+      job.progress = 100;
+      this.activeJobs.set(jobId, job);
+    } catch (error) {
+      console.error(`Error processing job ${jobId}:`, error);
       const job = this.activeJobs.get(jobId);
       if (job) {
-        job.status = "completed";
-        job.progress = 100;
-        job.metadata.pageTitle = "Example Page";
-        job.data.text = ["Sample text 1", "Sample text 2"];
+        job.status = "failed";
+        job.error = error.message;
+        job.progress = 0;
         this.activeJobs.set(jobId, job);
       }
-    }, 3000);
+      throw error;
+    }
+  }
 
-    return jobId;
+  /**
+   * Run AI analysis on scraped content
+   */
+  async runAIAnalysis(
+    resultId: string,
+    options: ScrapeOptions["aiOptions"],
+  ): Promise<any> {
+    try {
+      // Get the job state
+      const job = this.activeJobs.get(resultId);
+      if (!job) throw new Error(`Job ${resultId} not found`);
+
+      // Update progress
+      job.progress = 60;
+      this.activeJobs.set(resultId, job);
+
+      // Call the API to run AI analysis
+      const response = await axios.post("/api/scraping/analyze", {
+        resultId,
+        options,
+      });
+
+      // Update job with AI analysis results
+      job.progress = 90;
+      job.aiAnalysis = response.data.aiAnalysis;
+      this.activeJobs.set(resultId, job);
+
+      return response.data;
+    } catch (error) {
+      console.error("Error running AI analysis:", error);
+      throw new Error(`Failed to run AI analysis: ${error.message}`);
+    }
   }
 
   /**
