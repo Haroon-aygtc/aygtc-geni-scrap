@@ -2,6 +2,7 @@ import React, { useState, useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Select,
   SelectContent,
@@ -17,7 +18,20 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { SelectorConfig, DatabaseConfig } from "@/services/scrapingService";
-import { Loader2, Database, Save } from "lucide-react";
+import { Loader2, Database, Save, AlertCircle, HelpCircle } from "lucide-react";
+import { useToast } from "@/components/ui/use-toast";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
+import {
+  Accordion,
+  AccordionContent,
+  AccordionItem,
+  AccordionTrigger,
+} from "@/components/ui/accordion";
 import axios from "axios";
 
 interface DatabaseConfigPanelProps {
@@ -34,6 +48,7 @@ const DatabaseConfigPanel: React.FC<DatabaseConfigPanelProps> = ({
   selectors,
   onSaveConfig,
 }) => {
+  const { toast } = useToast();
   const [tables, setTables] = useState<TableInfo[]>([]);
   const [selectedTable, setSelectedTable] = useState("");
   const [columnMappings, setColumnMappings] = useState<Record<string, string>>(
@@ -41,6 +56,11 @@ const DatabaseConfigPanel: React.FC<DatabaseConfigPanelProps> = ({
   );
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [dbType, setDbType] = useState<
+    "postgres" | "mysql" | "sqlite" | "mongodb"
+  >("postgres");
+  const [includeTimestamp, setIncludeTimestamp] = useState(true);
+  const [includeUrl, setIncludeUrl] = useState(true);
 
   // Fetch database tables and columns
   useEffect(() => {
@@ -168,6 +188,11 @@ const DatabaseConfigPanel: React.FC<DatabaseConfigPanelProps> = ({
   const handleSaveConfig = () => {
     if (!selectedTable) {
       setError("Please select a table");
+      toast({
+        title: "Validation Error",
+        description: "Please select a table",
+        variant: "destructive",
+      });
       return;
     }
 
@@ -181,15 +206,41 @@ const DatabaseConfigPanel: React.FC<DatabaseConfigPanelProps> = ({
 
     if (Object.keys(filteredMappings).length === 0) {
       setError("Please map at least one selector to a database column");
+      toast({
+        title: "Validation Error",
+        description: "Please map at least one selector to a database column",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    // Check for duplicate column names
+    const uniqueColumnNames = new Set(Object.values(filteredMappings));
+    if (uniqueColumnNames.size !== Object.keys(filteredMappings).length) {
+      setError("Column names must be unique");
+      toast({
+        title: "Validation Error",
+        description: "Column names must be unique",
+        variant: "destructive",
+      });
       return;
     }
 
     const config: DatabaseConfig = {
       table: selectedTable,
       columns: filteredMappings,
+      dbType,
+      options: {
+        includeTimestamp,
+        includeUrl,
+      },
     };
 
     onSaveConfig(config);
+    toast({
+      title: "Configuration Saved",
+      description: `Database configuration saved for table ${selectedTable}`,
+    });
   };
 
   if (loading) {
@@ -226,29 +277,144 @@ const DatabaseConfigPanel: React.FC<DatabaseConfigPanelProps> = ({
           </p>
         ) : (
           <>
-            <div className="space-y-2">
-              <Label htmlFor="table-select">Select Table</Label>
-              <Select value={selectedTable} onValueChange={handleTableSelect}>
-                <SelectTrigger id="table-select">
-                  <SelectValue placeholder="Select a table" />
-                </SelectTrigger>
-                <SelectContent>
-                  {tables.map((table) => (
-                    <SelectItem key={table.name} value={table.name}>
-                      {table.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label htmlFor="table-select">Select Table</Label>
+                <Select value={selectedTable} onValueChange={handleTableSelect}>
+                  <SelectTrigger id="table-select">
+                    <SelectValue placeholder="Select a table" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {tables.map((table) => (
+                      <SelectItem key={table.name} value={table.name}>
+                        {table.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="db-type">Database Type</Label>
+                <Select
+                  value={dbType}
+                  onValueChange={(value) => setDbType(value as any)}
+                >
+                  <SelectTrigger id="db-type">
+                    <SelectValue placeholder="Select database type" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="postgres">PostgreSQL</SelectItem>
+                    <SelectItem value="mysql">MySQL</SelectItem>
+                    <SelectItem value="sqlite">SQLite</SelectItem>
+                    <SelectItem value="mongodb">MongoDB</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
             </div>
+
+            <Accordion type="single" collapsible className="w-full">
+              <AccordionItem value="options">
+                <AccordionTrigger>Additional Options</AccordionTrigger>
+                <AccordionContent>
+                  <div className="space-y-4 pt-2">
+                    <div className="flex items-center space-x-2">
+                      <Checkbox
+                        id="include-timestamp"
+                        checked={includeTimestamp}
+                        onCheckedChange={(checked) =>
+                          setIncludeTimestamp(checked as boolean)
+                        }
+                      />
+                      <Label
+                        htmlFor="include-timestamp"
+                        className="cursor-pointer"
+                      >
+                        Include timestamp column
+                      </Label>
+                    </div>
+
+                    <div className="flex items-center space-x-2">
+                      <Checkbox
+                        id="include-url"
+                        checked={includeUrl}
+                        onCheckedChange={(checked) =>
+                          setIncludeUrl(checked as boolean)
+                        }
+                      />
+                      <Label htmlFor="include-url" className="cursor-pointer">
+                        Include source URL column
+                      </Label>
+                    </div>
+                  </div>
+                </AccordionContent>
+              </AccordionItem>
+            </Accordion>
 
             {selectedTable && (
               <>
                 <div className="pt-4">
-                  <h4 className="text-sm font-medium mb-2">
-                    Map Selectors to Columns
-                  </h4>
-                  <div className="space-y-3">
+                  <div className="flex items-center justify-between mb-2">
+                    <h4 className="text-sm font-medium">
+                      Map Selectors to Columns
+                    </h4>
+                    <div className="flex gap-2">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => {
+                          // Select all selectors
+                          const newMappings = { ...columnMappings };
+                          selectors.forEach((selector) => {
+                            if (!newMappings[selector.id]) {
+                              const table = tables.find(
+                                (t) => t.name === selectedTable,
+                              );
+                              if (table) {
+                                // Try to find a matching column
+                                const matchingColumn = table.columns.find(
+                                  (col) =>
+                                    col.toLowerCase() ===
+                                      selector.name.toLowerCase() ||
+                                    col
+                                      .toLowerCase()
+                                      .includes(selector.name.toLowerCase()),
+                                );
+                                newMappings[selector.id] =
+                                  matchingColumn ||
+                                  selector.name
+                                    .toLowerCase()
+                                    .replace(/\s+/g, "_");
+                              }
+                            }
+                          });
+                          setColumnMappings(newMappings);
+                          toast({
+                            title: "All Selectors Mapped",
+                            description:
+                              "All selectors have been mapped to columns",
+                          });
+                        }}
+                      >
+                        Auto-Map All
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => {
+                          setColumnMappings({});
+                          toast({
+                            title: "Mappings Cleared",
+                            description:
+                              "All column mappings have been cleared",
+                          });
+                        }}
+                      >
+                        Clear All
+                      </Button>
+                    </div>
+                  </div>
+                  <div className="space-y-3 border rounded-md p-3">
                     {selectors.map((selector) => {
                       const table = tables.find(
                         (t) => t.name === selectedTable,
@@ -256,34 +422,78 @@ const DatabaseConfigPanel: React.FC<DatabaseConfigPanelProps> = ({
                       return (
                         <div
                           key={selector.id}
-                          className="grid grid-cols-2 gap-2 items-center"
+                          className="grid grid-cols-1 md:grid-cols-2 gap-2 items-center border-b pb-3 last:border-0 last:pb-0"
                         >
                           <div className="text-sm">
-                            <span className="font-medium">{selector.name}</span>
+                            <div className="flex items-center gap-1">
+                              <span className="font-medium">
+                                {selector.name}
+                              </span>
+                              <TooltipProvider>
+                                <Tooltip>
+                                  <TooltipTrigger asChild>
+                                    <HelpCircle
+                                      size={14}
+                                      className="text-gray-400 cursor-help"
+                                    />
+                                  </TooltipTrigger>
+                                  <TooltipContent>
+                                    <p>Type: {selector.type}</p>
+                                    {selector.attribute && (
+                                      <p>Attribute: {selector.attribute}</p>
+                                    )}
+                                    {selector.listItemSelector && (
+                                      <p>
+                                        List item: {selector.listItemSelector}
+                                      </p>
+                                    )}
+                                  </TooltipContent>
+                                </Tooltip>
+                              </TooltipProvider>
+                            </div>
                             <span className="text-gray-500 text-xs block truncate">
                               {selector.selector}
                             </span>
                           </div>
-                          <Select
-                            value={columnMappings[selector.id] || ""}
-                            onValueChange={(value) =>
-                              handleColumnMappingChange(selector.id, value)
-                            }
-                          >
-                            <SelectTrigger>
-                              <SelectValue placeholder="Select column">
-                                {columnMappings[selector.id] || ""}
-                              </SelectValue>
-                            </SelectTrigger>
-                            <SelectContent>
-                              <SelectItem value="">-- Skip --</SelectItem>
-                              {table?.columns.map((column) => (
-                                <SelectItem key={column} value={column}>
-                                  {column}
-                                </SelectItem>
-                              ))}
-                            </SelectContent>
-                          </Select>
+                          <div className="flex gap-2 items-center">
+                            <Select
+                              value={columnMappings[selector.id] || ""}
+                              onValueChange={(value) =>
+                                handleColumnMappingChange(selector.id, value)
+                              }
+                            >
+                              <SelectTrigger>
+                                <SelectValue placeholder="Select column">
+                                  {columnMappings[selector.id] || ""}
+                                </SelectValue>
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="">-- Skip --</SelectItem>
+                                {table?.columns.map((column) => (
+                                  <SelectItem key={column} value={column}>
+                                    {column}
+                                  </SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => {
+                                // Generate a column name based on selector name
+                                const columnName = selector.name
+                                  .toLowerCase()
+                                  .replace(/\s+/g, "_");
+                                handleColumnMappingChange(
+                                  selector.id,
+                                  columnName,
+                                );
+                              }}
+                              className="whitespace-nowrap"
+                            >
+                              Auto
+                            </Button>
+                          </div>
                         </div>
                       );
                     })}

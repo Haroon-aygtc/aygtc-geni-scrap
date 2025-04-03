@@ -9,9 +9,14 @@ import axios from "axios";
 interface WebPreviewProps {
   url: string;
   onSelectorCreated: (selector: SelectorConfig) => void;
+  mode?: "visual" | "code";
 }
 
-const WebPreview: React.FC<WebPreviewProps> = ({ url, onSelectorCreated }) => {
+const WebPreview: React.FC<WebPreviewProps> = ({
+  url,
+  onSelectorCreated,
+  mode = "visual",
+}) => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [fullscreen, setFullscreen] = useState(false);

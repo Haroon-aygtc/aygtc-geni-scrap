@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from "react";
-import { X, Move, Plus, Check } from "lucide-react";
+import { X, Move, Plus, Check, Copy, Crosshair } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -11,6 +11,13 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { SelectorConfig } from "@/services/scrapingService";
+import { useToast } from "@/components/ui/use-toast";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 
 interface SelectorToolProps {
   iframeRef: React.RefObject<HTMLIFrameElement>;
@@ -27,6 +34,10 @@ const SelectorTool: React.FC<SelectorToolProps> = ({
   position,
   size,
 }) => {
+  const { toast } = useToast();
+  const [dragging, setDragging] = useState(false);
+  const [dragPosition, setDragPosition] = useState(position);
+  const dragStartRef = useRef({ x: 0, y: 0, posX: 0, posY: 0 });
   const [isSelecting, setIsSelecting] = useState(false);
   const [selectedElement, setSelectedElement] = useState<HTMLElement | null>(
     null,
@@ -86,6 +97,58 @@ const SelectorTool: React.FC<SelectorToolProps> = ({
     }
 
     return path.join(" > ");
+  };
+
+  // Handle dragging
+  const handleDragStart = (e: React.MouseEvent) => {
+    setDragging(true);
+    dragStartRef.current = {
+      x: e.clientX,
+      y: e.clientY,
+      posX: dragPosition.x,
+      posY: dragPosition.y,
+    };
+  };
+
+  const handleDragMove = (e: MouseEvent) => {
+    if (!dragging) return;
+
+    const dx = e.clientX - dragStartRef.current.x;
+    const dy = e.clientY - dragStartRef.current.y;
+
+    setDragPosition({
+      x: dragStartRef.current.posX + dx,
+      y: dragStartRef.current.posY + dy,
+    });
+  };
+
+  const handleDragEnd = () => {
+    setDragging(false);
+  };
+
+  // Add and remove global event listeners for dragging
+  useEffect(() => {
+    if (dragging) {
+      document.addEventListener("mousemove", handleDragMove);
+      document.addEventListener("mouseup", handleDragEnd);
+    } else {
+      document.removeEventListener("mousemove", handleDragMove);
+      document.removeEventListener("mouseup", handleDragEnd);
+    }
+
+    return () => {
+      document.removeEventListener("mousemove", handleDragMove);
+      document.removeEventListener("mouseup", handleDragEnd);
+    };
+  }, [dragging]);
+
+  // Copy selector to clipboard
+  const copySelector = () => {
+    navigator.clipboard.writeText(selectorPath);
+    toast({
+      title: "Copied to Clipboard",
+      description: "Selector has been copied to clipboard",
+    });
   };
 
   // Function to start the selection process
@@ -150,6 +213,11 @@ const SelectorTool: React.FC<SelectorToolProps> = ({
         iframe.contentDocument?.body.removeChild(overlay);
 
         setIsSelecting(false);
+
+        toast({
+          title: "Element Selected",
+          description: `Selected ${target.tagName.toLowerCase()} element`,
+        });
       };
 
       overlay.addEventListener("mouseover", mouseover);
@@ -201,7 +269,32 @@ const SelectorTool: React.FC<SelectorToolProps> = ({
 
   // Save the selector configuration
   const saveSelector = () => {
-    if (!selectorPath || !selectorName) return;
+    if (!selectorPath || !selectorName) {
+      toast({
+        title: "Validation Error",
+        description: "Selector name and CSS selector are required",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    if (selectorType === "attribute" && !attribute) {
+      toast({
+        title: "Validation Error",
+        description: "Please specify an attribute name for attribute selector",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    if (selectorType === "list" && !listItemSelector) {
+      toast({
+        title: "Validation Error",
+        description: "Please specify a list item selector for list selector",
+        variant: "destructive",
+      });
+      return;
+    }
 
     const newSelector: SelectorConfig = {
       id: `selector_${Date.now()}`,
@@ -219,6 +312,10 @@ const SelectorTool: React.FC<SelectorToolProps> = ({
     }
 
     onSelectorCreated(newSelector);
+    toast({
+      title: "Selector Created",
+      description: `Successfully created selector "${selectorName}"`,
+    });
     onClose();
   };
 
@@ -226,14 +323,17 @@ const SelectorTool: React.FC<SelectorToolProps> = ({
     <div
       className="bg-white border border-gray-200 rounded-md shadow-lg z-50 flex flex-col overflow-hidden absolute"
       style={{
-        top: position.y,
-        left: position.x,
+        top: dragPosition.y,
+        left: dragPosition.x,
         width: size.width,
         height: size.height,
       }}
     >
       {/* Header */}
-      <div className="p-2 bg-gray-100 flex items-center justify-between border-b border-gray-200">
+      <div
+        className="p-2 bg-gray-100 flex items-center justify-between border-b border-gray-200 cursor-move"
+        onMouseDown={handleDragStart}
+      >
         <div className="flex items-center gap-2">
           <Move size={16} className="text-gray-500" />
           <span className="text-sm font-medium">Element Selector</span>
@@ -250,9 +350,16 @@ const SelectorTool: React.FC<SelectorToolProps> = ({
             onClick={startSelection}
             disabled={isSelecting}
             className="flex items-center gap-2"
+            variant={isSelecting ? "secondary" : "default"}
           >
-            <Plus size={16} />
-            {isSelecting ? "Selecting..." : "Select Element"}
+            {isSelecting ? (
+              <>Selecting Element...</>
+            ) : (
+              <>
+                <Crosshair size={16} />
+                Select Element
+              </>
+            )}
           </Button>
         </div>
 
@@ -260,11 +367,30 @@ const SelectorTool: React.FC<SelectorToolProps> = ({
           <>
             <div className="flex flex-col gap-2">
               <Label htmlFor="selector-path">CSS Selector</Label>
-              <Input
-                id="selector-path"
-                value={selectorPath}
-                onChange={(e) => setSelectorPath(e.target.value)}
-              />
+              <div className="flex gap-2">
+                <Input
+                  id="selector-path"
+                  value={selectorPath}
+                  onChange={(e) => setSelectorPath(e.target.value)}
+                  className="flex-1"
+                />
+                <TooltipProvider>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        variant="outline"
+                        size="icon"
+                        onClick={copySelector}
+                      >
+                        <Copy size={16} />
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent>
+                      <p>Copy selector</p>
+                    </TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
+              </div>
             </div>
 
             <div className="flex flex-col gap-2">

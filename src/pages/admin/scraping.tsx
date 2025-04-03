@@ -1,5 +1,5 @@
 import React from "react";
-import ScrappingModule from "@/components/admin/scrapping/index";
+import ScrapingModule from "@/components/admin/scraping";
 import AdminPageHeader from "@/components/admin/common/AdminPageHeader";
 
 export default function ScrapingPage() {
@@ -9,7 +9,7 @@ export default function ScrapingPage() {
         title="Web Scraping"
         description="AI-powered web scraping for content extraction and analysis"
       />
-      <ScrappingModule />
+      <ScrapingModule />
     </div>
   );
 }
