@@ -56,11 +56,13 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 
-import { contextRulesApi } from "@/services/apiService";
-import { ContextRule, ResponseFilter } from "@/types/contextRules";
+import contextRulesService from "@/services/contextRulesService";
+import { ContextRule } from "@/services/contextRulesService";
+import { ResponseFilter } from "@/types/contextRules";
 import knowledgeBaseService, {
   KnowledgeBaseConfig,
 } from "@/services/knowledgeBaseService";
+import logger from "@/utils/logger";
 
 // Define the schema for context rules
 const contextRuleSchema = z.object({
@@ -150,41 +152,27 @@ const ContextRulesEditor = () => {
     const fetchRules = async () => {
       try {
         setIsLoading(true);
-        try {
-          const data = await contextRulesApi.getAll();
-          // Ensure data is an array
-          if (Array.isArray(data)) {
-            setRules(data);
-          } else if (data && Array.isArray(data.rules)) {
-            // If data is an object with a rules array property
-            setRules(data.rules);
-          } else {
-            // Fallback to empty array if data is not in expected format
-            console.warn("Unexpected data format from API", data);
-            setRules([]);
-          }
-          setError(null);
-        } catch (apiError) {
-          console.warn("API fetch failed, using mock data", apiError);
-          const result = await import(
-            "@/services/mockContextRulesService"
-          ).then((module) => module.default.getContextRules());
-          // Ensure result.rules is an array
-          if (result && Array.isArray(result.rules)) {
-            setRules(result.rules);
-          } else {
-            console.warn("Unexpected data format from mock service", result);
-            setRules([]);
-          }
-        }
-      } catch (error) {
-        import("@/utils/logger").then((module) => {
-          const logger = module.default;
-          logger.error(
-            "Error fetching context rules",
-            error instanceof Error ? error : new Error(String(error)),
+        const response = await contextRulesService.getContextRules(
+          100,
+          0,
+          true,
+        );
+        if (response && Array.isArray(response.rules)) {
+          setRules(response.rules);
+        } else {
+          // Fallback to empty array if data is not in expected format
+          logger.warn(
+            "Unexpected data format from context rules service",
+            response,
           );
-        });
+          setRules([]);
+        }
+        setError(null);
+      } catch (error) {
+        logger.error(
+          "Error fetching context rules",
+          error instanceof Error ? error : new Error(String(error)),
+        );
         setError("Failed to load context rules. Please try again.");
         setRules([]);
       } finally {
@@ -209,21 +197,44 @@ const ContextRulesEditor = () => {
   const handleCreateRule = async (data: FormContextRule) => {
     try {
       setIsSaving(true);
-      const newRule = await contextRulesApi.create(
-        data as Omit<ContextRule, "id" | "createdAt" | "updatedAt">,
+      // Convert form data to the format expected by the service
+      const ruleData = {
+        name: data.name,
+        description: data.description,
+        isActive: data.isActive,
+        priority: 10, // Default priority
+        conditions: [
+          {
+            type: "contextType",
+            value: data.contextType,
+            operator: "equals",
+          },
+          ...data.keywords.map((keyword) => ({
+            type: "keyword",
+            value: keyword,
+            operator: "contains",
+          })),
+        ],
+        actions:
+          data.responseFilters?.map((filter) => ({
+            type: filter.type,
+            value: filter.value,
+            parameters: { action: filter.action },
+          })) || [],
+      };
+
+      const newRule = await contextRulesService.createContextRule(
+        ruleData as Omit<ContextRule, "id" | "createdAt" | "updatedAt">,
       );
       setRules([...rules, newRule]);
       setActiveTab("rules-list");
       reset();
       setError(null);
     } catch (error) {
-      import("@/utils/logger").then((module) => {
-        const logger = module.default;
-        logger.error(
-          "Error creating context rule",
-          error instanceof Error ? error : new Error(String(error)),
-        );
-      });
+      logger.error(
+        "Error creating context rule",
+        error instanceof Error ? error : new Error(String(error)),
+      );
       setError("Failed to create context rule. Please try again.");
     } finally {
       setIsSaving(false);
@@ -235,9 +246,36 @@ const ContextRulesEditor = () => {
 
     try {
       setIsSaving(true);
-      const updatedRule = await contextRulesApi.update(
+      // Convert form data to the format expected by the service
+      const ruleData = {
+        name: data.name,
+        description: data.description,
+        isActive: data.isActive,
+        conditions: [
+          {
+            type: "contextType",
+            value: data.contextType,
+            operator: "equals",
+          },
+          ...data.keywords.map((keyword) => ({
+            type: "keyword",
+            value: keyword,
+            operator: "contains",
+          })),
+        ],
+        actions:
+          data.responseFilters?.map((filter) => ({
+            type: filter.type,
+            value: filter.value,
+            parameters: { action: filter.action },
+          })) || [],
+      };
+
+      const updatedRule = await contextRulesService.updateContextRule(
         selectedRule.id,
-        data as Partial<ContextRule>,
+        ruleData as Partial<
+          Omit<ContextRule, "id" | "createdAt" | "updatedAt">
+        >,
       );
       setRules(
         rules.map((rule) => (rule.id === updatedRule.id ? updatedRule : rule)),
@@ -247,13 +285,10 @@ const ContextRulesEditor = () => {
       reset();
       setError(null);
     } catch (error) {
-      import("@/utils/logger").then((module) => {
-        const logger = module.default;
-        logger.error(
-          "Error updating context rule",
-          error instanceof Error ? error : new Error(String(error)),
-        );
-      });
+      logger.error(
+        "Error updating context rule",
+        error instanceof Error ? error : new Error(String(error)),
+      );
       setError("Failed to update context rule. Please try again.");
     } finally {
       setIsSaving(false);
@@ -265,17 +300,14 @@ const ContextRulesEditor = () => {
 
     try {
       setIsLoading(true);
-      await contextRulesApi.delete(id);
+      await contextRulesService.deleteContextRule(id);
       setRules(rules.filter((rule) => rule.id !== id));
       setError(null);
     } catch (error) {
-      import("@/utils/logger").then((module) => {
-        const logger = module.default;
-        logger.error(
-          "Error deleting context rule",
-          error instanceof Error ? error : new Error(String(error)),
-        );
-      });
+      logger.error(
+        "Error deleting context rule",
+        error instanceof Error ? error : new Error(String(error)),
+      );
       setError("Failed to delete context rule. Please try again.");
     } finally {
       setIsLoading(false);
@@ -284,13 +316,37 @@ const ContextRulesEditor = () => {
 
   const handleEditRule = (rule: ContextRule) => {
     setSelectedRule(rule);
+
+    // Extract keywords from conditions
+    const keywords =
+      rule.conditions
+        ?.filter((c) => c.type === "keyword")
+        ?.map((c) => c.value) || [];
+
+    // Extract response filters from actions
+    const responseFilters =
+      rule.actions?.map((a) => ({
+        type: a.type as "keyword" | "regex" | "semantic",
+        value: a.value,
+        action:
+          (a.parameters?.action as "block" | "flag" | "modify") || "block",
+      })) || [];
+
+    // Extract context type from conditions
+    const contextTypeCondition = rule.conditions?.find(
+      (c) => c.type === "contextType",
+    );
+    const contextType =
+      (contextTypeCondition?.value as "business" | "general") || "business";
+
     reset({
       ...rule,
-      keywords: rule.keywords || [],
-      excludedTopics: rule.excludedTopics || [],
-      responseFilters: rule.responseFilters || [],
-      useKnowledgeBases: rule.useKnowledgeBases || false,
-      knowledgeBaseIds: rule.knowledgeBaseIds || [],
+      contextType,
+      keywords,
+      excludedTopics: [],
+      responseFilters,
+      useKnowledgeBases: false,
+      knowledgeBaseIds: [],
     });
     setActiveTab("create-rule");
   };
@@ -362,17 +418,35 @@ const ContextRulesEditor = () => {
       setIsTestingRule(true);
       setTestResult(null);
       setError(null);
-      const result = await contextRulesApi.testRule(selectedRule.id, testQuery);
+
+      // Simple test implementation since we don't have a direct test endpoint
+      // Extract keywords from the rule's conditions
+      const keywords =
+        selectedRule.conditions
+          ?.filter((c) => c.type === "keyword")
+          ?.map((c) => c.value) || [];
+
+      // Check if any keywords match the test query
+      const matches = keywords.filter((keyword) =>
+        testQuery.toLowerCase().includes(keyword.toLowerCase()),
+      );
+
+      // Simulate a response
+      const result = {
+        matches,
+        result:
+          matches.length > 0
+            ? `The query matches ${matches.length} keywords: ${matches.join(", ")}. This rule would be applied.`
+            : "No keywords matched. This rule would not be applied.",
+      };
+
       setTestResult(result);
       setIsTestDialogOpen(true);
     } catch (error) {
-      import("@/utils/logger").then((module) => {
-        const logger = module.default;
-        logger.error(
-          "Error testing context rule",
-          error instanceof Error ? error : new Error(String(error)),
-        );
-      });
+      logger.error(
+        "Error testing context rule",
+        error instanceof Error ? error : new Error(String(error)),
+      );
       setError("Failed to test context rule. Please try again.");
     } finally {
       setIsTestingRule(false);
