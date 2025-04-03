@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Loader2, RefreshCw, Maximize2, Minimize2, Plus } from "lucide-react";
@@ -38,13 +38,21 @@ const WebPreview: React.FC<WebPreviewProps> = ({
     // Create a proxy URL to avoid CORS issues
     const fetchProxyUrl = async () => {
       try {
-        // In production, this would call your proxy API endpoint
-        const proxiedUrl = `/api/scraping/proxy?url=${encodeURIComponent(url)}`;
-        setProxyUrl(proxiedUrl);
+        // Make an actual API call to the proxy endpoint
+        const response = await axios.get(
+          `/api/scraping/proxy?url=${encodeURIComponent(url)}`,
+        );
+        if (response.status === 200) {
+          // For iframe loading, we still need to use the proxy URL
+          const proxiedUrl = `/api/scraping/proxy?url=${encodeURIComponent(url)}`;
+          setProxyUrl(proxiedUrl);
+        } else {
+          throw new Error(`Failed to proxy URL: ${response.statusText}`);
+        }
       } catch (err) {
         console.error("Error creating proxy URL:", err);
         setError(
-          `Failed to create proxy for ${url}. Please check if the URL is valid.`,
+          `Failed to create proxy for ${url}. ${err.response?.data?.message || err.message || "Please check if the URL is valid."}`,
         );
         setLoading(false);
       }
