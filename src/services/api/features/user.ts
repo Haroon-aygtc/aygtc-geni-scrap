@@ -4,8 +4,10 @@
  * This module provides functionality for user management.
  */
 
-import { getSupabaseClient } from "../core/supabase";
 import logger from "@/utils/logger";
+import { getMySQLClient, QueryTypes } from "@/services/mysqlClient";
+import User, { getSafeUser } from "@/models/User";
+import UserActivity from "@/models/UserActivity";
 
 /**
  * User profile interface
@@ -37,55 +39,63 @@ export interface UserActivity {
 }
 
 /**
+ * Convert a User model to UserProfile interface
+ * @param user User model instance
+ * @returns UserProfile object
+ */
+const mapUserToProfile = (user: any): UserProfile => {
+  return {
+    id: user.id,
+    email: user.email,
+    fullName: user.full_name,
+    avatarUrl: user.avatar_url,
+    role: user.role || "user",
+    isActive: user.is_active,
+    metadata: user.metadata,
+    lastLoginAt: user.last_login_at,
+    createdAt: user.created_at,
+    updatedAt: user.updated_at,
+  };
+};
+
+/**
+ * Convert a UserActivity model to UserActivity interface
+ * @param activity UserActivity model instance
+ * @returns UserActivity object
+ */
+const mapActivityToInterface = (activity: any): UserActivity => {
+  return {
+    id: activity.id,
+    userId: activity.user_id,
+    action: activity.action,
+    ipAddress: activity.ip_address,
+    userAgent: activity.user_agent,
+    metadata: activity.metadata,
+    createdAt: activity.created_at,
+  };
+};
+
+/**
  * Get a user by ID
  * @param userId User ID
  * @returns User profile or null if not found
  */
 export const getUser = async (userId: string): Promise<UserProfile | null> => {
   try {
-    const supabase = getSupabaseClient();
+    const sequelize = await getMySQLClient();
+    const users = await sequelize.query(
+      "SELECT * FROM users WHERE id = :userId LIMIT 1",
+      {
+        replacements: { userId },
+        type: QueryTypes.SELECT,
+      },
+    );
 
-    // Get user from auth.users
-    const { data: authUser, error: authError } =
-      await supabase.auth.admin.getUserById(userId);
-
-    if (authError) {
-      throw authError;
-    }
-
-    if (!authUser.user) {
+    if (!users || users.length === 0) {
       return null;
     }
 
-    // Get user profile from public.users
-    const { data: profileData, error: profileError } = await supabase
-      .from("users")
-      .select("*")
-      .eq("id", userId)
-      .single();
-
-    if (profileError && profileError.code !== "PGRST116") {
-      // Ignore not found error
-      throw profileError;
-    }
-
-    // Combine auth user and profile data
-    return {
-      id: authUser.user.id,
-      email: authUser.user.email,
-      fullName: profileData?.full_name || authUser.user.user_metadata?.name,
-      avatarUrl:
-        profileData?.avatar_url || authUser.user.user_metadata?.avatar_url,
-      role: profileData?.role || authUser.user.user_metadata?.role || "user",
-      isActive: !authUser.user.banned_until,
-      metadata: {
-        ...authUser.user.user_metadata,
-        ...profileData?.metadata,
-      },
-      lastLoginAt: authUser.user.last_sign_in_at,
-      createdAt: authUser.user.created_at,
-      updatedAt: profileData?.updated_at || authUser.user.updated_at,
-    };
+    return mapUserToProfile(users[0]);
   } catch (error) {
     logger.error(`Error getting user ${userId}`, error);
     return null;
@@ -105,36 +115,26 @@ export const getUsers = async (
   includeInactive: boolean = false,
 ): Promise<UserProfile[]> => {
   try {
-    const supabase = getSupabaseClient();
+    const sequelize = await getMySQLClient();
 
-    // Get users from public.users table
-    let query = supabase
-      .from("users")
-      .select("*")
-      .order("created_at", { ascending: false })
-      .range(offset, offset + limit - 1);
+    let query = "SELECT * FROM users";
+    const replacements: any = {};
 
     if (!includeInactive) {
-      query = query.eq("is_active", true);
+      query += " WHERE is_active = :isActive";
+      replacements.isActive = true;
     }
 
-    const { data, error } = await query;
+    query += " ORDER BY created_at DESC LIMIT :limit OFFSET :offset";
+    replacements.limit = limit;
+    replacements.offset = offset;
 
-    if (error) throw error;
+    const users = await sequelize.query(query, {
+      replacements,
+      type: QueryTypes.SELECT,
+    });
 
-    // Map to UserProfile interface
-    return (data || []).map((user) => ({
-      id: user.id,
-      email: user.email,
-      fullName: user.full_name,
-      avatarUrl: user.avatar_url,
-      role: user.role || "user",
-      isActive: user.is_active,
-      metadata: user.metadata,
-      lastLoginAt: user.last_login_at,
-      createdAt: user.created_at,
-      updatedAt: user.updated_at,
-    }));
+    return users.map(mapUserToProfile);
   } catch (error) {
     logger.error("Error getting users", error);
     return [];
@@ -152,42 +152,33 @@ export const updateUser = async (
   updates: Partial<UserProfile>,
 ): Promise<UserProfile | null> => {
   try {
-    const supabase = getSupabaseClient();
+    const sequelize = await getMySQLClient();
 
-    // Update auth.users metadata
-    if (updates.fullName || updates.avatarUrl || updates.metadata) {
-      const { error: authError } = await supabase.auth.admin.updateUserById(
-        userId,
-        {
-          user_metadata: {
-            name: updates.fullName,
-            avatar_url: updates.avatarUrl,
-            ...updates.metadata,
-          },
-        },
-      );
-
-      if (authError) throw authError;
-    }
-
-    // Update public.users profile
+    // Convert from UserProfile format to database format
     const updateData: Record<string, any> = {};
     if (updates.fullName !== undefined) updateData.full_name = updates.fullName;
     if (updates.avatarUrl !== undefined)
       updateData.avatar_url = updates.avatarUrl;
     if (updates.role !== undefined) updateData.role = updates.role;
     if (updates.isActive !== undefined) updateData.is_active = updates.isActive;
-    if (updates.metadata !== undefined) updateData.metadata = updates.metadata;
+    if (updates.metadata !== undefined)
+      updateData.metadata = JSON.stringify(updates.metadata);
+
+    // Add updated_at timestamp
     updateData.updated_at = new Date().toISOString();
 
-    const { data, error } = await supabase
-      .from("users")
-      .update(updateData)
-      .eq("id", userId)
-      .select()
-      .single();
+    // Build SET clause for SQL
+    const setClause = Object.keys(updateData)
+      .map((key) => `${key} = :${key}`)
+      .join(", ");
 
-    if (error) throw error;
+    // Add userId to replacements
+    const replacements = { ...updateData, userId };
+
+    await sequelize.query(`UPDATE users SET ${setClause} WHERE id = :userId`, {
+      replacements,
+      type: QueryTypes.UPDATE,
+    });
 
     // Get the updated user
     return getUser(userId);
@@ -204,28 +195,21 @@ export const updateUser = async (
  */
 export const deactivateUser = async (userId: string): Promise<boolean> => {
   try {
-    const supabase = getSupabaseClient();
+    const sequelize = await getMySQLClient();
 
-    // Update public.users
-    const { error: profileError } = await supabase
-      .from("users")
-      .update({
-        is_active: false,
-        updated_at: new Date().toISOString(),
-      })
-      .eq("id", userId);
-
-    if (profileError) throw profileError;
-
-    // Ban user in auth.users
-    const { error: authError } = await supabase.auth.admin.updateUserById(
-      userId,
+    await sequelize.query(
+      "UPDATE users SET is_active = false, updated_at = :now WHERE id = :userId",
       {
-        banned_until: "2100-01-01T00:00:00Z", // Far future date
+        replacements: {
+          userId,
+          now: new Date().toISOString(),
+        },
+        type: QueryTypes.UPDATE,
       },
     );
 
-    if (authError) throw authError;
+    // Log the deactivation
+    await logUserActivity(userId, "account_deactivated");
 
     return true;
   } catch (error) {
@@ -241,28 +225,21 @@ export const deactivateUser = async (userId: string): Promise<boolean> => {
  */
 export const reactivateUser = async (userId: string): Promise<boolean> => {
   try {
-    const supabase = getSupabaseClient();
+    const sequelize = await getMySQLClient();
 
-    // Update public.users
-    const { error: profileError } = await supabase
-      .from("users")
-      .update({
-        is_active: true,
-        updated_at: new Date().toISOString(),
-      })
-      .eq("id", userId);
-
-    if (profileError) throw profileError;
-
-    // Unban user in auth.users
-    const { error: authError } = await supabase.auth.admin.updateUserById(
-      userId,
+    await sequelize.query(
+      "UPDATE users SET is_active = true, updated_at = :now WHERE id = :userId",
       {
-        banned_until: null,
+        replacements: {
+          userId,
+          now: new Date().toISOString(),
+        },
+        type: QueryTypes.UPDATE,
       },
     );
 
-    if (authError) throw authError;
+    // Log the reactivation
+    await logUserActivity(userId, "account_reactivated");
 
     return true;
   } catch (error) {
@@ -284,25 +261,16 @@ export const getUserActivity = async (
   offset: number = 0,
 ): Promise<UserActivity[]> => {
   try {
-    const supabase = getSupabaseClient();
-    const { data, error } = await supabase
-      .from("user_activity")
-      .select("*")
-      .eq("user_id", userId)
-      .order("created_at", { ascending: false })
-      .range(offset, offset + limit - 1);
+    const sequelize = await getMySQLClient();
+    const activities = await sequelize.query(
+      "SELECT * FROM user_activity WHERE user_id = :userId ORDER BY created_at DESC LIMIT :limit OFFSET :offset",
+      {
+        replacements: { userId, limit, offset },
+        type: QueryTypes.SELECT,
+      },
+    );
 
-    if (error) throw error;
-
-    return (data || []).map((activity) => ({
-      id: activity.id,
-      userId: activity.user_id,
-      action: activity.action,
-      ipAddress: activity.ip_address,
-      userAgent: activity.user_agent,
-      metadata: activity.metadata,
-      createdAt: activity.created_at,
-    }));
+    return activities.map(mapActivityToInterface);
   } catch (error) {
     logger.error(`Error getting activity for user ${userId}`, error);
     return [];
@@ -325,22 +293,35 @@ export const logUserActivity = async (
   userAgent?: string,
 ): Promise<void> => {
   try {
-    const supabase = getSupabaseClient();
-    await supabase.from("user_activity").insert({
-      user_id: userId,
-      action,
-      ip_address: ipAddress,
-      user_agent: userAgent,
-      metadata,
-      created_at: new Date().toISOString(),
-    });
+    const sequelize = await getMySQLClient();
+
+    await sequelize.query(
+      "INSERT INTO user_activity (id, user_id, action, ip_address, user_agent, metadata, created_at) VALUES (UUID(), :userId, :action, :ipAddress, :userAgent, :metadata, :createdAt)",
+      {
+        replacements: {
+          userId,
+          action,
+          ipAddress: ipAddress || null,
+          userAgent: userAgent || null,
+          metadata: metadata ? JSON.stringify(metadata) : null,
+          createdAt: new Date().toISOString(),
+        },
+        type: QueryTypes.INSERT,
+      },
+    );
 
     // Update last_login_at if action is login
     if (action === "login") {
-      await supabase
-        .from("users")
-        .update({ last_login_at: new Date().toISOString() })
-        .eq("id", userId);
+      await sequelize.query(
+        "UPDATE users SET last_login_at = :now WHERE id = :userId",
+        {
+          replacements: {
+            now: new Date().toISOString(),
+            userId,
+          },
+          type: QueryTypes.UPDATE,
+        },
+      );
     }
   } catch (error) {
     logger.error(`Error logging activity for user ${userId}`, error);
@@ -354,41 +335,40 @@ export const logUserActivity = async (
  */
 export const getUserStats = async (): Promise<any> => {
   try {
-    const supabase = getSupabaseClient();
+    const sequelize = await getMySQLClient();
 
     // Get total users count
-    const { count: totalUsers, error: countError } = await supabase
-      .from("users")
-      .select("*", { count: "exact", head: true });
-
-    if (countError) throw countError;
+    const [totalUsersResult] = await sequelize.query(
+      "SELECT COUNT(*) as count FROM users",
+      { type: QueryTypes.SELECT },
+    );
+    const totalUsers = totalUsersResult.count;
 
     // Get active users count
-    const { count: activeUsers, error: activeError } = await supabase
-      .from("users")
-      .select("*", { count: "exact", head: true })
-      .eq("is_active", true);
-
-    if (activeError) throw activeError;
+    const [activeUsersResult] = await sequelize.query(
+      "SELECT COUNT(*) as count FROM users WHERE is_active = true",
+      { type: QueryTypes.SELECT },
+    );
+    const activeUsers = activeUsersResult.count;
 
     // Get users by role
-    const { data: roleData, error: roleError } = await supabase
-      .from("users")
-      .select("role, count")
-      .group("role");
-
-    if (roleError) throw roleError;
+    const roleData = await sequelize.query(
+      "SELECT role, COUNT(*) as count FROM users GROUP BY role",
+      { type: QueryTypes.SELECT },
+    );
 
     // Get new users in last 30 days
     const thirtyDaysAgo = new Date();
     thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
 
-    const { count: newUsers, error: newError } = await supabase
-      .from("users")
-      .select("*", { count: "exact", head: true })
-      .gte("created_at", thirtyDaysAgo.toISOString());
-
-    if (newError) throw newError;
+    const [newUsersResult] = await sequelize.query(
+      "SELECT COUNT(*) as count FROM users WHERE created_at >= :thirtyDaysAgo",
+      {
+        replacements: { thirtyDaysAgo: thirtyDaysAgo.toISOString() },
+        type: QueryTypes.SELECT,
+      },
+    );
+    const newUsers = newUsersResult.count;
 
     return {
       totalUsers: totalUsers || 0,

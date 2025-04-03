@@ -37,11 +37,15 @@ export const initUser = async () => {
         unique: true,
         validate: {
           isEmail: true,
+          notEmpty: true,
         },
       },
       full_name: {
         type: DataTypes.STRING(255),
         allowNull: false,
+        validate: {
+          notEmpty: true,
+        },
       },
       password_hash: {
         type: DataTypes.STRING(255),
@@ -93,6 +97,9 @@ export const initUser = async () => {
         type: DataTypes.INTEGER,
         allowNull: false,
         defaultValue: 0,
+        validate: {
+          min: 0,
+        },
       },
       account_locked_until: {
         type: DataTypes.DATE,
@@ -127,6 +134,18 @@ export const initUser = async () => {
           fields: ["verification_token"],
         },
       ],
+      hooks: {
+        beforeCreate: (user) => {
+          // Ensure created_at and updated_at are set
+          const now = new Date();
+          if (!user.created_at) user.created_at = now;
+          if (!user.updated_at) user.updated_at = now;
+        },
+        beforeUpdate: (user) => {
+          // Ensure updated_at is set on update
+          user.updated_at = new Date();
+        },
+      },
     },
   );
 
@@ -135,11 +154,15 @@ export const initUser = async () => {
 
 /**
  * Get a user by ID with sensitive fields removed
+ * @param user User object to sanitize
+ * @returns Sanitized user object or null
  */
 export const getSafeUser = (user: User) => {
   if (!user) return null;
 
   const userObj = user.get({ plain: true });
+
+  // Remove sensitive fields
   delete userObj.password_hash;
   delete userObj.reset_token;
   delete userObj.reset_token_expires;
@@ -149,6 +172,30 @@ export const getSafeUser = (user: User) => {
   delete userObj.account_locked_until;
 
   return userObj;
+};
+
+/**
+ * Check if a user account is locked
+ * @param user User to check
+ * @returns Boolean indicating if account is locked
+ */
+export const isAccountLocked = (user: User): boolean => {
+  if (!user || !user.account_locked_until) return false;
+
+  const now = new Date();
+  return now < user.account_locked_until;
+};
+
+/**
+ * Check if a password reset token is valid
+ * @param user User to check
+ * @returns Boolean indicating if reset token is valid
+ */
+export const isResetTokenValid = (user: User): boolean => {
+  if (!user || !user.reset_token || !user.reset_token_expires) return false;
+
+  const now = new Date();
+  return now < user.reset_token_expires;
 };
 
 export default User;

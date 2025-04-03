@@ -1,5 +1,7 @@
 import apiService from "./apiService";
-import supabase from "./supabaseClient";
+import { executeQuery } from "./api/core/mysql";
+import logger from "../utils/logger";
+import { User } from "../models";
 
 // Centralized admin service for data fetching and operations
 const adminService = {
@@ -18,7 +20,7 @@ const adminService = {
         modelUsage,
       };
     } catch (error) {
-      console.error("Error fetching dashboard stats:", error);
+      logger.error("Error fetching dashboard stats:", error);
       throw error;
     }
   },
@@ -26,68 +28,61 @@ const adminService = {
   // User management
   getUsers: async () => {
     try {
-      const { data, error } = await supabase.from("users").select("*");
-      if (error) throw error;
-      return data;
+      const users = await User.findAll();
+      return users;
     } catch (error) {
-      console.error("Error fetching users:", error);
+      logger.error("Error fetching users:", error);
       throw error;
     }
   },
 
   getUserById: async (id: string) => {
     try {
-      const { data, error } = await supabase
-        .from("users")
-        .select("*")
-        .eq("id", id)
-        .single();
-      if (error) throw error;
-      return data;
+      const user = await User.findByPk(id);
+      if (!user) {
+        throw new Error(`User with ID ${id} not found`);
+      }
+      return user;
     } catch (error) {
-      console.error(`Error fetching user ${id}:`, error);
+      logger.error(`Error fetching user ${id}:`, error);
       throw error;
     }
   },
 
   createUser: async (userData: any) => {
     try {
-      const { data, error } = await supabase
-        .from("users")
-        .insert([userData])
-        .select()
-        .single();
-      if (error) throw error;
-      return data;
+      const user = await User.create(userData);
+      return user;
     } catch (error) {
-      console.error("Error creating user:", error);
+      logger.error("Error creating user:", error);
       throw error;
     }
   },
 
   updateUser: async (id: string, userData: any) => {
     try {
-      const { data, error } = await supabase
-        .from("users")
-        .update(userData)
-        .eq("id", id)
-        .select()
-        .single();
-      if (error) throw error;
-      return data;
+      const user = await User.findByPk(id);
+      if (!user) {
+        throw new Error(`User with ID ${id} not found`);
+      }
+      await user.update(userData);
+      return user;
     } catch (error) {
-      console.error(`Error updating user ${id}:`, error);
+      logger.error(`Error updating user ${id}:`, error);
       throw error;
     }
   },
 
   deleteUser: async (id: string) => {
     try {
-      const { error } = await supabase.from("users").delete().eq("id", id);
-      if (error) throw error;
+      const user = await User.findByPk(id);
+      if (!user) {
+        throw new Error(`User with ID ${id} not found`);
+      }
+      await user.destroy();
       return true;
     } catch (error) {
-      console.error(`Error deleting user ${id}:`, error);
+      logger.error(`Error deleting user ${id}:`, error);
       throw error;
     }
   },
@@ -95,18 +90,128 @@ const adminService = {
   // Context rules management
   getContextRules: async () => {
     try {
-      return await apiService.contextRules.getAll();
+      const sql = `
+        SELECT * FROM context_rules 
+        WHERE is_active = true 
+        ORDER BY created_at DESC
+      `;
+      const contextRules = await executeQuery(sql);
+      return contextRules;
     } catch (error) {
-      console.error("Error fetching context rules:", error);
+      logger.error("Error fetching context rules:", error);
       throw error;
     }
   },
 
   getContextRuleById: async (id: string) => {
     try {
-      return await apiService.contextRules.getById(id);
+      const sql = `
+        SELECT * FROM context_rules 
+        WHERE id = ? 
+        LIMIT 1
+      `;
+      const [contextRule] = await executeQuery(sql, [id]);
+      if (!contextRule) {
+        throw new Error(`Context rule with ID ${id} not found`);
+      }
+      return contextRule;
     } catch (error) {
-      console.error(`Error fetching context rule ${id}:`, error);
+      logger.error(`Error fetching context rule ${id}:`, error);
+      throw error;
+    }
+  },
+
+  createContextRule: async (ruleData: any) => {
+    try {
+      const sql = `
+        INSERT INTO context_rules 
+        (id, name, description, is_active, context_type, keywords, excluded_topics, 
+        prompt_template, response_filters, use_knowledge_bases, knowledge_base_ids, 
+        preferred_model, version, created_at, updated_at) 
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
+      `;
+
+      await executeQuery(
+        sql,
+        [
+          ruleData.id,
+          ruleData.name,
+          ruleData.description || null,
+          ruleData.is_active,
+          ruleData.context_type,
+          JSON.stringify(ruleData.keywords || []),
+          JSON.stringify(ruleData.excluded_topics || []),
+          ruleData.prompt_template || null,
+          JSON.stringify(ruleData.response_filters || []),
+          ruleData.use_knowledge_bases || false,
+          JSON.stringify(ruleData.knowledge_base_ids || []),
+          ruleData.preferred_model || null,
+          ruleData.version || 1,
+        ],
+        "INSERT",
+      );
+
+      return await adminService.getContextRuleById(ruleData.id);
+    } catch (error) {
+      logger.error("Error creating context rule:", error);
+      throw error;
+    }
+  },
+
+  updateContextRule: async (id: string, ruleData: any) => {
+    try {
+      const sql = `
+        UPDATE context_rules 
+        SET 
+          name = ?, 
+          description = ?, 
+          is_active = ?, 
+          context_type = ?, 
+          keywords = ?, 
+          excluded_topics = ?, 
+          prompt_template = ?, 
+          response_filters = ?, 
+          use_knowledge_bases = ?, 
+          knowledge_base_ids = ?, 
+          preferred_model = ?, 
+          version = version + 1, 
+          updated_at = NOW() 
+        WHERE id = ?
+      `;
+
+      await executeQuery(
+        sql,
+        [
+          ruleData.name,
+          ruleData.description || null,
+          ruleData.is_active,
+          ruleData.context_type,
+          JSON.stringify(ruleData.keywords || []),
+          JSON.stringify(ruleData.excluded_topics || []),
+          ruleData.prompt_template || null,
+          JSON.stringify(ruleData.response_filters || []),
+          ruleData.use_knowledge_bases || false,
+          JSON.stringify(ruleData.knowledge_base_ids || []),
+          ruleData.preferred_model || null,
+          id,
+        ],
+        "UPDATE",
+      );
+
+      return await adminService.getContextRuleById(id);
+    } catch (error) {
+      logger.error(`Error updating context rule ${id}:`, error);
+      throw error;
+    }
+  },
+
+  deleteContextRule: async (id: string) => {
+    try {
+      const sql = `DELETE FROM context_rules WHERE id = ?`;
+      await executeQuery(sql, [id], "DELETE");
+      return true;
+    } catch (error) {
+      logger.error(`Error deleting context rule ${id}:`, error);
       throw error;
     }
   },
@@ -114,18 +219,108 @@ const adminService = {
   // Prompt templates management
   getPromptTemplates: async () => {
     try {
-      return await apiService.promptTemplates.getAll();
+      const sql = `
+        SELECT * FROM prompt_templates 
+        ORDER BY created_at DESC
+      `;
+      const promptTemplates = await executeQuery(sql);
+      return promptTemplates;
     } catch (error) {
-      console.error("Error fetching prompt templates:", error);
+      logger.error("Error fetching prompt templates:", error);
       throw error;
     }
   },
 
   getPromptTemplateById: async (id: string) => {
     try {
-      return await apiService.promptTemplates.getById(id);
+      const sql = `
+        SELECT * FROM prompt_templates 
+        WHERE id = ? 
+        LIMIT 1
+      `;
+      const [promptTemplate] = await executeQuery(sql, [id]);
+      if (!promptTemplate) {
+        throw new Error(`Prompt template with ID ${id} not found`);
+      }
+      return promptTemplate;
     } catch (error) {
-      console.error(`Error fetching prompt template ${id}:`, error);
+      logger.error(`Error fetching prompt template ${id}:`, error);
+      throw error;
+    }
+  },
+
+  createPromptTemplate: async (templateData: any) => {
+    try {
+      const sql = `
+        INSERT INTO prompt_templates 
+        (id, name, description, template_text, variables, category, is_active, created_at, updated_at) 
+        VALUES (?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
+      `;
+
+      await executeQuery(
+        sql,
+        [
+          templateData.id,
+          templateData.name,
+          templateData.description || null,
+          templateData.template_text,
+          JSON.stringify(templateData.variables || []),
+          templateData.category || "general",
+          templateData.is_active || true,
+        ],
+        "INSERT",
+      );
+
+      return await adminService.getPromptTemplateById(templateData.id);
+    } catch (error) {
+      logger.error("Error creating prompt template:", error);
+      throw error;
+    }
+  },
+
+  updatePromptTemplate: async (id: string, templateData: any) => {
+    try {
+      const sql = `
+        UPDATE prompt_templates 
+        SET 
+          name = ?, 
+          description = ?, 
+          template_text = ?, 
+          variables = ?, 
+          category = ?, 
+          is_active = ?, 
+          updated_at = NOW() 
+        WHERE id = ?
+      `;
+
+      await executeQuery(
+        sql,
+        [
+          templateData.name,
+          templateData.description || null,
+          templateData.template_text,
+          JSON.stringify(templateData.variables || []),
+          templateData.category || "general",
+          templateData.is_active || true,
+          id,
+        ],
+        "UPDATE",
+      );
+
+      return await adminService.getPromptTemplateById(id);
+    } catch (error) {
+      logger.error(`Error updating prompt template ${id}:`, error);
+      throw error;
+    }
+  },
+
+  deletePromptTemplate: async (id: string) => {
+    try {
+      const sql = `DELETE FROM prompt_templates WHERE id = ?`;
+      await executeQuery(sql, [id], "DELETE");
+      return true;
+    } catch (error) {
+      logger.error(`Error deleting prompt template ${id}:`, error);
       throw error;
     }
   },

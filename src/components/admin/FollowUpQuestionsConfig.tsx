@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import {
   Card,
   CardContent,
@@ -122,6 +122,13 @@ const FollowUpQuestionsConfig: React.FC<FollowUpQuestionsConfigProps> = ({
     useState<TopicBasedQuestionSet | null>(null);
   const [newTopicName, setNewTopicName] = useState("");
   const [newTopicQuestions, setNewTopicQuestions] = useState("");
+
+  // Update config when initialConfig changes
+  useEffect(() => {
+    if (initialConfig) {
+      setConfig(initialConfig);
+    }
+  }, [initialConfig]);
 
   const handleSave = async () => {
     if (!onSave) return;

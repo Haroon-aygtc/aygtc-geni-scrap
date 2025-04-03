@@ -4,12 +4,12 @@
  * This module provides functionality for managing chat sessions and messages.
  */
 
-import { supabase } from "../core/supabase";
-import logger from "@/utils/logger";
-import { realtimeService } from "../core/realtime";
-import { websocketService } from "../core/websocket";
-import { moderationService } from "./moderation";
 import { v4 as uuidv4 } from "uuid";
+import logger from "@/utils/logger";
+import { executeQuery, executeTransaction } from "../core/mysql";
+import { moderationService } from "./moderation";
+import { websocketService } from "../core/websocket";
+import { realtimeService } from "../core/realtime";
 
 export interface ChatMessage {
   id: string;
@@ -61,26 +61,35 @@ class ChatService {
     try {
       const sessionId = uuidv4();
       const now = new Date().toISOString();
+      const id = uuidv4();
 
-      const { data, error } = await supabase
-        .from("chat_sessions")
-        .insert({
-          id: uuidv4(),
-          session_id: sessionId,
-          user_id: userId,
-          context_rule_id: contextRuleId,
-          is_active: true,
-          metadata: metadata || {},
-          created_at: now,
-          updated_at: now,
-          last_message_at: now,
-        })
-        .select()
-        .single();
+      const sql = `
+        INSERT INTO chat_sessions 
+        (id, session_id, user_id, context_rule_id, is_active, metadata, created_at, updated_at, last_message_at) 
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `;
 
-      if (error) throw error;
+      await executeQuery(
+        sql,
+        [
+          id,
+          sessionId,
+          userId,
+          contextRuleId || null,
+          true,
+          metadata ? JSON.stringify(metadata) : JSON.stringify({}),
+          now,
+          now,
+          now,
+        ],
+        "INSERT",
+      );
 
-      return this.mapSessionFromDb(data);
+      // Fetch the created session
+      const selectSql = `SELECT * FROM chat_sessions WHERE id = ?`;
+      const [sessionData] = await executeQuery(selectSql, [id]);
+
+      return this.mapSessionFromDb(sessionData);
     } catch (error) {
       logger.error(
         "Error creating chat session",
@@ -95,15 +104,12 @@ class ChatService {
    */
   async getSession(sessionId: string): Promise<ChatSession | null> {
     try {
-      const { data, error } = await supabase
-        .from("chat_sessions")
-        .select("*")
-        .eq("session_id", sessionId)
-        .single();
+      const sql = `SELECT * FROM chat_sessions WHERE session_id = ? LIMIT 1`;
+      const results = await executeQuery(sql, [sessionId]);
 
-      if (error) throw error;
+      if (!results || results.length === 0) return null;
 
-      return this.mapSessionFromDb(data);
+      return this.mapSessionFromDb(results[0]);
     } catch (error) {
       logger.error(
         `Error fetching chat session ${sessionId}`,
@@ -121,21 +127,23 @@ class ChatService {
     activeOnly = true,
   ): Promise<ChatSession[]> {
     try {
-      let query = supabase
-        .from("chat_sessions")
-        .select("*")
-        .eq("user_id", userId)
-        .order("last_message_at", { ascending: false });
+      let sql = `
+        SELECT * FROM chat_sessions 
+        WHERE user_id = ? 
+      `;
+
+      const params = [userId];
 
       if (activeOnly) {
-        query = query.eq("is_active", true);
+        sql += ` AND is_active = ?`;
+        params.push(true);
       }
 
-      const { data, error } = await query;
+      sql += ` ORDER BY last_message_at DESC`;
 
-      if (error) throw error;
+      const results = await executeQuery(sql, params);
 
-      return data.map(this.mapSessionFromDb);
+      return results.map(this.mapSessionFromDb);
     } catch (error) {
       logger.error(
         `Error fetching user chat sessions for ${userId}`,
@@ -163,25 +171,44 @@ class ChatService {
     >,
   ): Promise<ChatSession | null> {
     try {
-      const updateData: Record<string, any> = {};
+      const setClauses = [];
+      const params = [];
 
-      if (updates.contextRuleId !== undefined)
-        updateData.context_rule_id = updates.contextRuleId;
-      if (updates.isActive !== undefined)
-        updateData.is_active = updates.isActive;
-      if (updates.metadata !== undefined)
-        updateData.metadata = updates.metadata;
+      if (updates.contextRuleId !== undefined) {
+        setClauses.push("context_rule_id = ?");
+        params.push(updates.contextRuleId);
+      }
 
-      const { data, error } = await supabase
-        .from("chat_sessions")
-        .update(updateData)
-        .eq("session_id", sessionId)
-        .select()
-        .single();
+      if (updates.isActive !== undefined) {
+        setClauses.push("is_active = ?");
+        params.push(updates.isActive);
+      }
 
-      if (error) throw error;
+      if (updates.metadata !== undefined) {
+        setClauses.push("metadata = ?");
+        params.push(JSON.stringify(updates.metadata));
+      }
 
-      return this.mapSessionFromDb(data);
+      // Always update the updated_at timestamp
+      const now = new Date().toISOString();
+      setClauses.push("updated_at = ?");
+      params.push(now);
+
+      // Add the session ID to the params
+      params.push(sessionId);
+
+      if (setClauses.length > 0) {
+        const sql = `
+          UPDATE chat_sessions 
+          SET ${setClauses.join(", ")} 
+          WHERE session_id = ?
+        `;
+
+        await executeQuery(sql, params, "UPDATE");
+      }
+
+      // Fetch the updated session
+      return await this.getSession(sessionId);
     } catch (error) {
       logger.error(
         `Error updating chat session ${sessionId}`,
@@ -243,65 +270,76 @@ class ChatService {
       const messageId = uuidv4();
       const now = new Date().toISOString();
 
-      // Prepare message data
-      const messageData = {
-        id: messageId,
-        session_id: sessionId,
-        user_id: userId,
-        message,
-        message_type: messageType,
-        metadata: metadata || {},
-        status: "pending",
-        created_at: now,
-      };
+      // Prepare queries for transaction
+      const queries = [];
 
-      // Insert the message
-      const { data, error } = await supabase
-        .from("chat_messages")
-        .insert(messageData)
-        .select()
-        .single();
+      // Insert message query
+      queries.push({
+        sql: `
+          INSERT INTO chat_messages 
+          (id, session_id, user_id, message, message_type, metadata, status, created_at) 
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `,
+        replacements: [
+          messageId,
+          sessionId,
+          userId,
+          message,
+          messageType,
+          metadata ? JSON.stringify(metadata) : JSON.stringify({}),
+          "pending",
+          now,
+        ],
+        queryType: "INSERT",
+      });
 
-      if (error) throw error;
+      // Update session's last_message_at
+      queries.push({
+        sql: `
+          UPDATE chat_sessions 
+          SET last_message_at = ?, updated_at = ? 
+          WHERE session_id = ?
+        `,
+        replacements: [now, now, sessionId],
+        queryType: "UPDATE",
+      });
 
       // Process attachments if any
       if (attachments && attachments.length > 0) {
-        const attachmentInserts = attachments.map((attachment) => ({
-          id: uuidv4(),
-          message_id: messageId,
-          type: attachment.type,
-          url: attachment.url,
-          filename: attachment.filename,
-          filesize: attachment.filesize,
-          metadata: attachment.metadata || {},
-          created_at: now,
-        }));
-
-        const { error: attachmentError } = await supabase
-          .from("chat_attachments")
-          .insert(attachmentInserts);
-
-        if (attachmentError) {
-          logger.error(
-            `Error saving attachments for message ${messageId}`,
-            attachmentError instanceof Error
-              ? attachmentError
-              : new Error(String(attachmentError)),
-          );
+        for (const attachment of attachments) {
+          const attachmentId = uuidv4();
+          queries.push({
+            sql: `
+              INSERT INTO chat_attachments 
+              (id, message_id, type, url, filename, filesize, metadata, created_at) 
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            `,
+            replacements: [
+              attachmentId,
+              messageId,
+              attachment.type,
+              attachment.url,
+              attachment.filename,
+              attachment.filesize,
+              attachment.metadata
+                ? JSON.stringify(attachment.metadata)
+                : JSON.stringify({}),
+              now,
+            ],
+            queryType: "INSERT",
+          });
         }
       }
 
-      // Update session's last_message_at
-      await supabase
-        .from("chat_sessions")
-        .update({ last_message_at: now, updated_at: now })
-        .eq("session_id", sessionId);
-
       // Mark as delivered
-      await supabase
-        .from("chat_messages")
-        .update({ status: "delivered" })
-        .eq("id", messageId);
+      queries.push({
+        sql: `UPDATE chat_messages SET status = ? WHERE id = ?`,
+        replacements: ["delivered", messageId],
+        queryType: "UPDATE",
+      });
+
+      // Execute all queries in a transaction
+      await executeTransaction(queries);
 
       // Also send via WebSocket if available
       this.sendMessageViaWebSocket(
@@ -368,23 +406,62 @@ class ChatService {
     before?: string,
   ): Promise<ChatMessage[]> {
     try {
-      let query = supabase
-        .from("chat_messages")
-        .select("*, chat_attachments(*)")
-        .eq("session_id", sessionId)
-        .order("created_at", { ascending: false })
-        .limit(limit);
+      let sql = `
+        SELECT m.*, a.id as attachment_id, a.type as attachment_type, 
+               a.url as attachment_url, a.filename as attachment_filename, 
+               a.filesize as attachment_filesize, a.metadata as attachment_metadata, 
+               a.created_at as attachment_created_at
+        FROM chat_messages m
+        LEFT JOIN chat_attachments a ON m.id = a.message_id
+        WHERE m.session_id = ?
+      `;
+
+      const params = [sessionId];
 
       if (before) {
-        query = query.lt("created_at", before);
+        sql += ` AND m.created_at < ?`;
+        params.push(before);
       }
 
-      const { data, error } = await query;
+      sql += ` ORDER BY m.created_at DESC LIMIT ?`;
+      params.push(limit);
 
-      if (error) throw error;
+      const results = await executeQuery(sql, params);
+
+      // Group by message ID to handle attachments
+      const messageMap = new Map<string, any>();
+
+      for (const row of results) {
+        if (!messageMap.has(row.id)) {
+          messageMap.set(row.id, {
+            ...row,
+            attachments: [],
+          });
+        }
+
+        // Add attachment if it exists
+        if (row.attachment_id) {
+          const message = messageMap.get(row.id);
+          message.attachments.push({
+            id: row.attachment_id,
+            messageId: row.id,
+            type: row.attachment_type,
+            url: row.attachment_url,
+            filename: row.attachment_filename,
+            filesize: row.attachment_filesize,
+            metadata: this.parseJsonField(row.attachment_metadata),
+            createdAt: row.attachment_created_at,
+          });
+        }
+      }
+
+      // Convert map to array and map to ChatMessage objects
+      const messages = Array.from(messageMap.values()).map(
+        this.mapMessageWithAttachmentsFromDb.bind(this),
+      );
 
       // Return in chronological order (oldest first)
-      return data.map(this.mapMessageWithAttachmentsFromDb).reverse();
+      return messages.reverse();
     } catch (error) {
       logger.error(
         `Error fetching messages for session ${sessionId}`,
@@ -399,15 +476,43 @@ class ChatService {
    */
   async getMessageById(messageId: string): Promise<ChatMessage | null> {
     try {
-      const { data, error } = await supabase
-        .from("chat_messages")
-        .select("*, chat_attachments(*)")
-        .eq("id", messageId)
-        .single();
+      const sql = `
+        SELECT m.*, a.id as attachment_id, a.type as attachment_type, 
+               a.url as attachment_url, a.filename as attachment_filename, 
+               a.filesize as attachment_filesize, a.metadata as attachment_metadata, 
+               a.created_at as attachment_created_at
+        FROM chat_messages m
+        LEFT JOIN chat_attachments a ON m.id = a.message_id
+        WHERE m.id = ?
+      `;
 
-      if (error) throw error;
+      const results = await executeQuery(sql, [messageId]);
 
-      return this.mapMessageWithAttachmentsFromDb(data);
+      if (!results || results.length === 0) return null;
+
+      // Group attachments with the message
+      const message = {
+        ...results[0],
+        attachments: [],
+      };
+
+      // Add attachments if they exist
+      for (const row of results) {
+        if (row.attachment_id) {
+          message.attachments.push({
+            id: row.attachment_id,
+            messageId: row.id,
+            type: row.attachment_type,
+            url: row.attachment_url,
+            filename: row.attachment_filename,
+            filesize: row.attachment_filesize,
+            metadata: this.parseJsonField(row.attachment_metadata),
+            createdAt: row.attachment_created_at,
+          });
+        }
+      }
+
+      return this.mapMessageWithAttachmentsFromDb(message);
     } catch (error) {
       logger.error(
         `Error fetching message ${messageId}`,
@@ -426,15 +531,21 @@ class ChatService {
     messageIds: string[],
   ): Promise<boolean> {
     try {
-      // Only mark messages that aren't from this user
-      const { error } = await supabase
-        .from("chat_messages")
-        .update({ status: "read" })
-        .in("id", messageIds)
-        .eq("session_id", sessionId)
-        .neq("user_id", userId);
+      if (!messageIds.length) return true;
 
-      if (error) throw error;
+      // Only mark messages that aren't from this user
+      const placeholders = messageIds.map(() => "?").join(",");
+      const sql = `
+        UPDATE chat_messages 
+        SET status = 'read' 
+        WHERE id IN (${placeholders}) 
+          AND session_id = ? 
+          AND user_id != ?
+      `;
+
+      const params = [...messageIds, sessionId, userId];
+
+      await executeQuery(sql, params, "UPDATE");
 
       // Notify via WebSocket that messages were read
       websocketService.sendMessage({
@@ -471,23 +582,19 @@ class ChatService {
       const filename = `${uuidv4()}.${fileExt}`;
       const filePath = `attachments/${sessionId}/${filename}`;
 
-      // Upload to Supabase Storage
-      const { data, error } = await supabase.storage
-        .from("chat-attachments")
-        .upload(filePath, file, {
-          cacheControl: "3600",
-          upsert: false,
-        });
+      // For MySQL implementation, we would need to handle file storage differently
+      // This could be using a file system, S3, or another storage solution
+      // For now, we'll implement a placeholder that returns a mock URL
 
-      if (error) throw error;
+      logger.info(
+        `File upload requested for session ${sessionId} by user ${userId}`,
+      );
 
-      // Get the public URL
-      const { data: urlData } = supabase.storage
-        .from("chat-attachments")
-        .getPublicUrl(filePath);
+      // Mock implementation - in a real app, replace with actual file storage
+      const mockUrl = `/api/attachments/${filePath}`;
 
       return {
-        url: urlData.publicUrl,
+        url: mockUrl,
         filename: file.name,
         filesize: file.size,
       };
@@ -529,6 +636,20 @@ class ChatService {
   }
 
   /**
+   * Parse a JSON field from the database
+   */
+  private parseJsonField(field: any): any {
+    if (!field) return {};
+
+    try {
+      return typeof field === "string" ? JSON.parse(field) : field;
+    } catch (error) {
+      logger.warn("Error parsing JSON field", error);
+      return {};
+    }
+  }
+
+  /**
    * Map database object to ChatSession
    */
   private mapSessionFromDb(data: any): ChatSession {
@@ -538,7 +659,7 @@ class ChatService {
       userId: data.user_id,
       contextRuleId: data.context_rule_id,
       isActive: data.is_active,
-      metadata: data.metadata,
+      metadata: this.parseJsonField(data.metadata),
       createdAt: data.created_at,
       updatedAt: data.updated_at,
       lastMessageAt: data.last_message_at,
@@ -555,7 +676,7 @@ class ChatService {
       userId: data.user_id,
       message: data.message,
       messageType: data.message_type,
-      metadata: data.metadata,
+      metadata: this.parseJsonField(data.metadata),
       status: data.status,
       createdAt: data.created_at,
     };
@@ -568,16 +689,16 @@ class ChatService {
     const message = this.mapMessageFromDb(data);
 
     // Add attachments if they exist
-    if (data.chat_attachments && Array.isArray(data.chat_attachments)) {
-      message.attachments = data.chat_attachments.map((attachment: any) => ({
+    if (data.attachments && Array.isArray(data.attachments)) {
+      message.attachments = data.attachments.map((attachment: any) => ({
         id: attachment.id,
-        messageId: attachment.message_id,
+        messageId: attachment.message_id || message.id,
         type: attachment.type,
         url: attachment.url,
         filename: attachment.filename,
         filesize: attachment.filesize,
-        metadata: attachment.metadata,
-        createdAt: attachment.created_at,
+        metadata: this.parseJsonField(attachment.metadata),
+        createdAt: attachment.createdAt || attachment.created_at,
       }));
     }
 

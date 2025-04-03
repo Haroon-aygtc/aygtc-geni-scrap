@@ -1,17 +1,18 @@
 /**
  * Knowledge Base Service Module
- * 
+ *
  * This module provides functionality for integrating with external knowledge bases.
  */
 
-import axios from 'axios';
-import logger from '@/utils/logger';
-import { supabase } from '../core/supabase';
+import axios from "axios";
+import logger from "@/utils/logger";
+import { getMySQLClient } from "../../mysqlClient";
+import { v4 as uuidv4 } from "uuid";
 
 export interface KnowledgeBaseConfig {
   id: string;
   name: string;
-  type: 'api' | 'database' | 'cms' | 'vector' | 'file';
+  type: "api" | "database" | "cms" | "vector" | "file";
   endpoint?: string;
   apiKey?: string;
   connectionString?: string;
@@ -51,16 +52,15 @@ class KnowledgeBaseService {
    */
   async getAllConfigs(): Promise<KnowledgeBaseConfig[]> {
     try {
-      const { data, error } = await supabase
-        .from('knowledge_base_configs')
-        .select('*')
-        .order('name');
+      const sequelize = await getMySQLClient();
+      const configs = await sequelize.query(
+        `SELECT * FROM knowledge_base_configs ORDER BY name`,
+        { type: sequelize.QueryTypes.SELECT },
+      );
 
-      if (error) throw error;
-
-      return data.map(this.mapConfigFromDb);
+      return configs.map(this.mapConfigFromDb);
     } catch (error) {
-      logger.error('Error fetching knowledge base configs', error);
+      logger.error("Error fetching knowledge base configs", error);
       return [];
     }
   }
@@ -70,15 +70,17 @@ class KnowledgeBaseService {
    */
   async getConfigById(id: string): Promise<KnowledgeBaseConfig | null> {
     try {
-      const { data, error } = await supabase
-        .from('knowledge_base_configs')
-        .select('*')
-        .eq('id', id)
-        .single();
+      const sequelize = await getMySQLClient();
+      const [config] = await sequelize.query(
+        `SELECT * FROM knowledge_base_configs WHERE id = ?`,
+        {
+          replacements: [id],
+          type: sequelize.QueryTypes.SELECT,
+        },
+      );
 
-      if (error) throw error;
-
-      return this.mapConfigFromDb(data);
+      if (!config) return null;
+      return this.mapConfigFromDb(config);
     } catch (error) {
       logger.error(`Error fetching knowledge base config with ID ${id}`, error);
       return null;
@@ -89,28 +91,57 @@ class KnowledgeBaseService {
    * Create a new knowledge base configuration
    */
   async createConfig(
-    config: Omit<KnowledgeBaseConfig, 'id' | 'createdAt' | 'updatedAt'>,
+    config: Omit<KnowledgeBaseConfig, "id" | "createdAt" | "updatedAt">,
   ): Promise<KnowledgeBaseConfig | null> {
     try {
       const now = new Date().toISOString();
+      const id = uuidv4();
       const newConfig = {
-        id: crypto.randomUUID(),
+        id,
         ...config,
         created_at: now,
         updated_at: now,
       };
 
-      const { data, error } = await supabase
-        .from('knowledge_base_configs')
-        .insert(this.mapConfigToDb(newConfig))
-        .select()
-        .single();
+      const sequelize = await getMySQLClient();
+      const dbConfig = this.mapConfigToDb(newConfig);
 
-      if (error) throw error;
+      await sequelize.query(
+        `INSERT INTO knowledge_base_configs 
+         (id, name, type, endpoint, api_key, connection_string, refresh_interval, 
+          last_synced_at, parameters, is_active, created_at, updated_at) 
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        {
+          replacements: [
+            id,
+            dbConfig.name,
+            dbConfig.type,
+            dbConfig.endpoint,
+            dbConfig.api_key,
+            dbConfig.connection_string,
+            dbConfig.refresh_interval,
+            dbConfig.last_synced_at,
+            JSON.stringify(dbConfig.parameters || {}),
+            dbConfig.is_active,
+            dbConfig.created_at,
+            dbConfig.updated_at,
+          ],
+          type: sequelize.QueryTypes.INSERT,
+        },
+      );
 
-      return this.mapConfigFromDb(data);
+      // Fetch the newly created config
+      const [createdConfig] = await sequelize.query(
+        `SELECT * FROM knowledge_base_configs WHERE id = ?`,
+        {
+          replacements: [id],
+          type: sequelize.QueryTypes.SELECT,
+        },
+      );
+
+      return this.mapConfigFromDb(createdConfig);
     } catch (error) {
-      logger.error('Error creating knowledge base config', error);
+      logger.error("Error creating knowledge base config", error);
       return null;
     }
   }
@@ -128,16 +159,85 @@ class KnowledgeBaseService {
         updated_at: new Date().toISOString(),
       };
 
-      const { data, error } = await supabase
-        .from('knowledge_base_configs')
-        .update(updateData)
-        .eq('id', id)
-        .select()
-        .single();
+      const sequelize = await getMySQLClient();
 
-      if (error) throw error;
+      // Build the update query dynamically
+      const updateFields = [];
+      const replacements = [];
 
-      return this.mapConfigFromDb(data);
+      if (updateData.name !== undefined) {
+        updateFields.push("name = ?");
+        replacements.push(updateData.name);
+      }
+
+      if (updateData.type !== undefined) {
+        updateFields.push("type = ?");
+        replacements.push(updateData.type);
+      }
+
+      if (updateData.endpoint !== undefined) {
+        updateFields.push("endpoint = ?");
+        replacements.push(updateData.endpoint);
+      }
+
+      if (updateData.api_key !== undefined) {
+        updateFields.push("api_key = ?");
+        replacements.push(updateData.api_key);
+      }
+
+      if (updateData.connection_string !== undefined) {
+        updateFields.push("connection_string = ?");
+        replacements.push(updateData.connection_string);
+      }
+
+      if (updateData.refresh_interval !== undefined) {
+        updateFields.push("refresh_interval = ?");
+        replacements.push(updateData.refresh_interval);
+      }
+
+      if (updateData.last_synced_at !== undefined) {
+        updateFields.push("last_synced_at = ?");
+        replacements.push(updateData.last_synced_at);
+      }
+
+      if (updateData.parameters !== undefined) {
+        updateFields.push("parameters = ?");
+        replacements.push(JSON.stringify(updateData.parameters));
+      }
+
+      if (updateData.is_active !== undefined) {
+        updateFields.push("is_active = ?");
+        replacements.push(updateData.is_active);
+      }
+
+      // Always update the updated_at timestamp
+      updateFields.push("updated_at = ?");
+      replacements.push(updateData.updated_at);
+
+      // Add the ID to the replacements
+      replacements.push(id);
+
+      if (updateFields.length > 0) {
+        await sequelize.query(
+          `UPDATE knowledge_base_configs SET ${updateFields.join(", ")} WHERE id = ?`,
+          {
+            replacements,
+            type: sequelize.QueryTypes.UPDATE,
+          },
+        );
+      }
+
+      // Fetch the updated config
+      const [updatedConfig] = await sequelize.query(
+        `SELECT * FROM knowledge_base_configs WHERE id = ?`,
+        {
+          replacements: [id],
+          type: sequelize.QueryTypes.SELECT,
+        },
+      );
+
+      if (!updatedConfig) return null;
+      return this.mapConfigFromDb(updatedConfig);
     } catch (error) {
       logger.error(`Error updating knowledge base config with ID ${id}`, error);
       return null;
@@ -149,12 +249,12 @@ class KnowledgeBaseService {
    */
   async deleteConfig(id: string): Promise<boolean> {
     try {
-      const { error } = await supabase
-        .from('knowledge_base_configs')
-        .delete()
-        .eq('id', id);
+      const sequelize = await getMySQLClient();
 
-      if (error) throw error;
+      await sequelize.query(`DELETE FROM knowledge_base_configs WHERE id = ?`, {
+        replacements: [id],
+        type: sequelize.QueryTypes.DELETE,
+      });
 
       return true;
     } catch (error) {
@@ -192,7 +292,7 @@ class KnowledgeBaseService {
         (a, b) => (b.relevanceScore || 0) - (a.relevanceScore || 0),
       );
     } catch (error) {
-      logger.error('Error querying knowledge bases', error);
+      logger.error("Error querying knowledge bases", error);
       return [];
     }
   }
@@ -204,42 +304,48 @@ class KnowledgeBaseService {
     contextRuleId?: string,
   ): Promise<KnowledgeBaseConfig[]> {
     try {
+      const sequelize = await getMySQLClient();
+
       if (!contextRuleId) {
         // If no context rule specified, get all active knowledge bases
-        const { data, error } = await supabase
-          .from('knowledge_base_configs')
-          .select('*')
-          .eq('is_active', true);
+        const configs = await sequelize.query(
+          `SELECT * FROM knowledge_base_configs WHERE is_active = true`,
+          { type: sequelize.QueryTypes.SELECT },
+        );
 
-        if (error) throw error;
-        return data.map(this.mapConfigFromDb);
+        return configs.map(this.mapConfigFromDb);
       }
 
       // Get knowledge bases linked to the context rule
-      const { data, error } = await supabase
-        .from('context_rule_knowledge_bases')
-        .select('knowledge_base_id')
-        .eq('context_rule_id', contextRuleId);
+      const linkedKbs = await sequelize.query(
+        `SELECT knowledge_base_id FROM context_rule_knowledge_bases WHERE context_rule_id = ?`,
+        {
+          replacements: [contextRuleId],
+          type: sequelize.QueryTypes.SELECT,
+        },
+      );
 
-      if (error) throw error;
-
-      if (data.length === 0) {
+      if (linkedKbs.length === 0) {
         return [];
       }
 
       // Get the actual knowledge base configs
-      const kbIds = data.map((item) => item.knowledge_base_id);
-      const { data: kbData, error: kbError } = await supabase
-        .from('knowledge_base_configs')
-        .select('*')
-        .in('id', kbIds)
-        .eq('is_active', true);
+      const kbIds = linkedKbs.map((item: any) => item.knowledge_base_id);
 
-      if (kbError) throw kbError;
+      // Build the IN clause safely
+      const placeholders = kbIds.map(() => "?").join(",");
 
-      return kbData.map(this.mapConfigFromDb);
+      const configs = await sequelize.query(
+        `SELECT * FROM knowledge_base_configs WHERE id IN (${placeholders}) AND is_active = true`,
+        {
+          replacements: [...kbIds],
+          type: sequelize.QueryTypes.SELECT,
+        },
+      );
+
+      return configs.map(this.mapConfigFromDb);
     } catch (error) {
-      logger.error('Error getting knowledge bases for context rule', error);
+      logger.error("Error getting knowledge bases for context rule", error);
       return [];
     }
   }
@@ -253,15 +359,15 @@ class KnowledgeBaseService {
   ): Promise<QueryResult[] | null> {
     try {
       switch (kb.type) {
-        case 'api':
+        case "api":
           return await this.queryApiKnowledgeBase(kb, params);
-        case 'database':
+        case "database":
           return await this.queryDatabaseKnowledgeBase(kb, params);
-        case 'cms':
+        case "cms":
           return await this.queryCmsKnowledgeBase(kb, params);
-        case 'vector':
+        case "vector":
           return await this.queryVectorKnowledgeBase(kb, params);
-        case 'file':
+        case "file":
           return await this.queryFileKnowledgeBase(kb, params);
         default:
           logger.warn(`Unsupported knowledge base type: ${kb.type}`);
@@ -289,13 +395,13 @@ class KnowledgeBaseService {
       }
 
       if (!kb.endpoint) {
-        throw new Error('API endpoint is required for API knowledge base');
+        throw new Error("API endpoint is required for API knowledge base");
       }
 
       // Prepare request headers
       const headers: Record<string, string> = {};
       if (kb.apiKey) {
-        headers['Authorization'] = `Bearer ${kb.apiKey}`;
+        headers["Authorization"] = `Bearer ${kb.apiKey}`;
       }
 
       // Prepare request parameters
@@ -315,7 +421,7 @@ class KnowledgeBaseService {
       const results: QueryResult[] = Array.isArray(response.data.results)
         ? response.data.results.map((item: any) => ({
             source: kb.name,
-            content: item.content || item.text || item.data || '',
+            content: item.content || item.text || item.data || "",
             metadata: {
               ...item.metadata,
               id: item.id,
@@ -347,7 +453,7 @@ class KnowledgeBaseService {
     try {
       if (!kb.connectionString) {
         throw new Error(
-          'Connection string is required for database knowledge base',
+          "Connection string is required for database knowledge base",
         );
       }
 
@@ -364,20 +470,23 @@ class KnowledgeBaseService {
       // 3. Execute a query based on the params.query
       // 4. Transform the results to QueryResult format
 
-      // For now, we'll use a direct Supabase query if the connection string is a Supabase URL
-      if (kb.connectionString.includes('supabase')) {
+      // For now, we'll use a direct MySQL query if the connection string is a MySQL URL
+      if (kb.connectionString.includes("mysql")) {
         try {
           // Extract table name from parameters
-          const tableName = kb.parameters?.table || 'documents';
-          const searchColumn = kb.parameters?.searchColumn || 'content';
+          const tableName = kb.parameters?.table || "documents";
+          const searchColumn = kb.parameters?.searchColumn || "content";
 
-          const { data, error } = await supabase
-            .from(tableName)
-            .select('*')
-            .textSearch(searchColumn, params.query)
-            .limit(params.limit || 5);
+          const sequelize = await getMySQLClient();
 
-          if (error) throw error;
+          // Use MATCH AGAINST for full-text search if available, otherwise fallback to LIKE
+          const data = await sequelize.query(
+            `SELECT * FROM ${tableName} WHERE ${searchColumn} LIKE ? LIMIT ?`,
+            {
+              replacements: [`%${params.query}%`, params.limit || 5],
+              type: sequelize.QueryTypes.SELECT,
+            },
+          );
 
           if (data && data.length > 0) {
             const results: QueryResult[] = data.map((item) => ({
@@ -401,7 +510,7 @@ class KnowledgeBaseService {
             return results;
           }
         } catch (dbError) {
-          logger.error(`Error querying Supabase database: ${dbError}`);
+          logger.error(`Error querying MySQL database: ${dbError}`);
           // Fall through to return empty results
         }
       }
@@ -432,23 +541,23 @@ class KnowledgeBaseService {
       }
 
       if (!kb.endpoint) {
-        throw new Error('API endpoint is required for CMS knowledge base');
+        throw new Error("API endpoint is required for CMS knowledge base");
       }
 
       // Prepare request headers
       const headers: Record<string, string> = {
-        'Content-Type': 'application/json',
+        "Content-Type": "application/json",
       };
 
       if (kb.apiKey) {
         // Different CMS systems use different authentication methods
-        if (kb.parameters?.authType === 'bearer') {
-          headers['Authorization'] = `Bearer ${kb.apiKey}`;
-        } else if (kb.parameters?.authType === 'apikey') {
-          headers['X-API-Key'] = kb.apiKey;
+        if (kb.parameters?.authType === "bearer") {
+          headers["Authorization"] = `Bearer ${kb.apiKey}`;
+        } else if (kb.parameters?.authType === "apikey") {
+          headers["X-API-Key"] = kb.apiKey;
         } else {
           // Default to bearer token
-          headers['Authorization'] = `Bearer ${kb.apiKey}`;
+          headers["Authorization"] = `Bearer ${kb.apiKey}`;
         }
       }
 
@@ -459,19 +568,19 @@ class KnowledgeBaseService {
       };
 
       // Handle different CMS types (WordPress, Contentful, Strapi, etc.)
-      if (kb.parameters?.cmsType === 'contentful') {
+      if (kb.parameters?.cmsType === "contentful") {
         requestParams = {
           query: `{
-            ${kb.parameters.contentType || 'article'}Collection(where: {${kb.parameters.searchField || 'content'}_contains: "${params.query}"}, limit: ${params.limit || 5}) {
+            ${kb.parameters.contentType || "article"}Collection(where: {${kb.parameters.searchField || "content"}_contains: "${params.query}"}, limit: ${params.limit || 5}) {
               items {
-                ${kb.parameters.fields || 'title content sys { id }'}
+                ${kb.parameters.fields || "title content sys { id }"}
               }
             }
           }`,
         };
-      } else if (kb.parameters?.cmsType === 'wordpress') {
+      } else if (kb.parameters?.cmsType === "wordpress") {
         // WordPress REST API format
-        const endpoint = `${kb.endpoint}/wp-json/wp/v2/${kb.parameters.contentType || 'posts'}?search=${encodeURIComponent(params.query)}&per_page=${params.limit || 5}`;
+        const endpoint = `${kb.endpoint}/wp-json/wp/v2/${kb.parameters.contentType || "posts"}?search=${encodeURIComponent(params.query)}&per_page=${params.limit || 5}`;
 
         try {
           const response = await axios.get(endpoint, { headers });
@@ -487,7 +596,7 @@ class KnowledgeBaseService {
                 id: item.id,
                 title: item.title?.rendered,
                 url: item.link,
-                contentType: kb.parameters?.contentType || 'post',
+                contentType: kb.parameters?.contentType || "post",
                 knowledgeBaseId: kb.id,
               },
               relevanceScore: 0.8, // WordPress doesn't provide relevance scores
@@ -513,8 +622,8 @@ class KnowledgeBaseService {
         // Transform the response to QueryResult format based on CMS type
         let results: QueryResult[] = [];
 
-        if (kb.parameters?.cmsType === 'contentful' && response.data?.data) {
-          const contentType = kb.parameters.contentType || 'article';
+        if (kb.parameters?.cmsType === "contentful" && response.data?.data) {
+          const contentType = kb.parameters.contentType || "article";
           const items =
             response.data.data[`${contentType}Collection`]?.items || [];
 
@@ -591,13 +700,13 @@ class KnowledgeBaseService {
       }
 
       if (!kb.endpoint) {
-        throw new Error('API endpoint is required for vector knowledge base');
+        throw new Error("API endpoint is required for vector knowledge base");
       }
 
       // Prepare request headers
       const headers: Record<string, string> = {};
       if (kb.apiKey) {
-        headers['Authorization'] = `Bearer ${kb.apiKey}`;
+        headers["Authorization"] = `Bearer ${kb.apiKey}`;
       }
 
       // Prepare request parameters
@@ -617,7 +726,7 @@ class KnowledgeBaseService {
       const results: QueryResult[] = Array.isArray(response.data.results)
         ? response.data.results.map((item: any) => ({
             source: kb.name,
-            content: item.content || item.text || '',
+            content: item.content || item.text || "",
             metadata: {
               ...item.metadata,
               id: item.id,
@@ -659,11 +768,11 @@ class KnowledgeBaseService {
       // If the endpoint is provided, it's likely a document search API
       if (kb.endpoint) {
         const headers: Record<string, string> = {
-          'Content-Type': 'application/json',
+          "Content-Type": "application/json",
         };
 
         if (kb.apiKey) {
-          headers['Authorization'] = `Bearer ${kb.apiKey}`;
+          headers["Authorization"] = `Bearer ${kb.apiKey}`;
         }
 
         // Prepare request parameters
@@ -692,12 +801,12 @@ class KnowledgeBaseService {
               [];
 
             const results: QueryResult[] = items.map((item: any) => ({
-              source: `${kb.name} (${item.fileName || item.name || 'Document'})`,
-              content: item.content || item.text || item.extract || '',
+              source: `${kb.name} (${item.fileName || item.name || "Document"})`,
+              content: item.content || item.text || item.extract || "",
               metadata: {
                 fileName: item.fileName || item.name,
                 fileType:
-                  item.fileType || item.extension || item.type || 'unknown',
+                  item.fileType || item.extension || item.type || "unknown",
                 fileSize: item.fileSize || item.size,
                 url: item.url || item.downloadUrl,
                 knowledgeBaseId: kb.id,
@@ -720,10 +829,10 @@ class KnowledgeBaseService {
         }
       }
 
-      // If we're using Supabase storage, we could potentially query that
-      if (kb.parameters?.useSupabaseStorage) {
-        logger.info('Supabase storage search is not yet implemented');
-        // This would require a separate indexing mechanism as Supabase storage
+      // If we're using file storage, we could potentially query that
+      if (kb.parameters?.useFileStorage) {
+        logger.info("File storage search is not yet implemented");
+        // This would require a separate indexing mechanism as the file storage
         // doesn't provide content search capabilities directly
       }
 
@@ -812,4 +921,76 @@ class KnowledgeBaseService {
   /**
    * Sync a knowledge base to update its content
    */
-  async syncKnowledgeBase(id: string): Promise<boolean>
+  async syncKnowledgeBase(id: string): Promise<boolean> {
+    try {
+      const kb = await this.getConfigById(id);
+      if (!kb) {
+        throw new Error(`Knowledge base with ID ${id} not found`);
+      }
+
+      // Update the last synced timestamp
+      await this.updateConfig(id, {
+        lastSyncedAt: new Date().toISOString(),
+      } as Partial<KnowledgeBaseConfig>);
+
+      // Clear cache entries for this knowledge base
+      this.clearCacheForKnowledgeBase(id);
+
+      return true;
+    } catch (error) {
+      logger.error(`Error syncing knowledge base ${id}`, error);
+      return false;
+    }
+  }
+
+  /**
+   * Clear cache entries for a specific knowledge base
+   */
+  private clearCacheForKnowledgeBase(id: string): void {
+    for (const [key, _] of this.cache.entries()) {
+      if (key.includes(`-${id}-`)) {
+        this.cache.delete(key);
+      }
+    }
+  }
+
+  /**
+   * Log a knowledge base query for analytics
+   */
+  async logQuery(params: {
+    userId: string;
+    query: string;
+    contextRuleId?: string;
+    knowledgeBaseIds: string[];
+    results: number;
+  }): Promise<void> {
+    try {
+      const sequelize = await getMySQLClient();
+
+      await sequelize.query(
+        `INSERT INTO knowledge_base_query_logs 
+         (id, user_id, query, context_rule_id, knowledge_base_ids, results_count, created_at) 
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        {
+          replacements: [
+            uuidv4(),
+            params.userId,
+            params.query,
+            params.contextRuleId || null,
+            params.knowledgeBaseIds.join(","),
+            params.results,
+            new Date().toISOString(),
+          ],
+          type: sequelize.QueryTypes.INSERT,
+        },
+      );
+    } catch (error) {
+      logger.error("Error logging knowledge base query", error);
+    }
+  }
+}
+
+// Create a singleton instance
+const knowledgeBaseService = new KnowledgeBaseService();
+
+export default knowledgeBaseService;

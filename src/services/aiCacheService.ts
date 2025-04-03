@@ -12,11 +12,14 @@ interface CacheEntry {
 }
 
 /**
- * Service for caching AI responses to reduce API calls
+ * Service for caching AI responses to reduce API calls and improve performance
  */
 const aiCacheService = {
   /**
    * Get a cached response if available
+   * @param prompt The prompt to look up in the cache
+   * @param model Optional model name to filter by
+   * @returns The cached entry or null if not found
    */
   getCachedResponse: async (
     prompt: string,
@@ -34,7 +37,7 @@ const aiCacheService = {
       const now = new Date();
       const sequelize = await getMySQLClient();
 
-      // Find cache entry in database
+      // Find cache entry in database with proper error handling
       const [cacheEntries] = await sequelize.query(
         `SELECT * FROM ai_response_cache 
          WHERE prompt_hash = ? AND model_used = ? AND expires_at > ?`,
@@ -53,7 +56,7 @@ const aiCacheService = {
         return null;
       }
 
-      // Safely parse metadata
+      // Safely parse metadata with error handling
       let parsedMetadata = {};
       if (cacheEntry.metadata) {
         try {
@@ -85,6 +88,12 @@ const aiCacheService = {
 
   /**
    * Cache an AI response for future use
+   * @param prompt The prompt to cache
+   * @param response The AI response to cache
+   * @param model The model used to generate the response
+   * @param metadata Optional metadata to store with the cache entry
+   * @param ttlSeconds Time-to-live in seconds (default: 1 hour)
+   * @returns Success status
    */
   cacheResponse: async (
     prompt: string,
@@ -110,64 +119,78 @@ const aiCacheService = {
       const expiresAt = new Date(now.getTime() + ttlSeconds * 1000);
       const sequelize = await getMySQLClient();
 
-      // Prepare metadata for storage
+      // Prepare metadata for storage with validation
       const metadataJson = JSON.stringify(metadata || {});
 
-      // Check if entry already exists
-      const [existingEntries] = await sequelize.query(
-        `SELECT id FROM ai_response_cache 
-         WHERE prompt_hash = ? AND model_used = ?`,
-        {
-          replacements: [promptHash, model],
-          type: sequelize.QueryTypes.SELECT,
-        },
-      );
+      // Use a transaction for data consistency
+      const transaction = await sequelize.transaction();
 
-      // Handle array result properly
-      const existingEntry = Array.isArray(existingEntries)
-        ? existingEntries[0]
-        : existingEntries;
-
-      if (existingEntry) {
-        // Update existing cache entry
-        await sequelize.query(
-          `UPDATE ai_response_cache 
-           SET response = ?, metadata = ?, updated_at = ?, expires_at = ? 
-           WHERE id = ?`,
+      try {
+        // Check if entry already exists
+        const [existingEntries] = await sequelize.query(
+          `SELECT id FROM ai_response_cache 
+           WHERE prompt_hash = ? AND model_used = ?`,
           {
-            replacements: [
-              response,
-              metadataJson,
-              now,
-              expiresAt,
-              existingEntry.id,
-            ],
-            type: sequelize.QueryTypes.UPDATE,
+            replacements: [promptHash, model],
+            type: sequelize.QueryTypes.SELECT,
+            transaction,
           },
         );
-      } else {
-        // Create new cache entry
-        await sequelize.query(
-          `INSERT INTO ai_response_cache 
-           (id, prompt, prompt_hash, response, model_used, metadata, created_at, updated_at, expires_at) 
-           VALUES (UUID(), ?, ?, ?, ?, ?, ?, ?, ?)`,
-          {
-            replacements: [
-              prompt,
-              promptHash,
-              response,
-              model,
-              metadataJson,
-              now,
-              now,
-              expiresAt,
-            ],
-            type: sequelize.QueryTypes.INSERT,
-          },
-        );
+
+        // Handle array result properly
+        const existingEntry = Array.isArray(existingEntries)
+          ? existingEntries[0]
+          : existingEntries;
+
+        if (existingEntry) {
+          // Update existing cache entry
+          await sequelize.query(
+            `UPDATE ai_response_cache 
+             SET response = ?, metadata = ?, updated_at = ?, expires_at = ? 
+             WHERE id = ?`,
+            {
+              replacements: [
+                response,
+                metadataJson,
+                now,
+                expiresAt,
+                existingEntry.id,
+              ],
+              type: sequelize.QueryTypes.UPDATE,
+              transaction,
+            },
+          );
+        } else {
+          // Create new cache entry
+          await sequelize.query(
+            `INSERT INTO ai_response_cache 
+             (id, prompt, prompt_hash, response, model_used, metadata, created_at, updated_at, expires_at) 
+             VALUES (UUID(), ?, ?, ?, ?, ?, ?, ?, ?)`,
+            {
+              replacements: [
+                prompt,
+                promptHash,
+                response,
+                model,
+                metadataJson,
+                now,
+                now,
+                expiresAt,
+              ],
+              type: sequelize.QueryTypes.INSERT,
+              transaction,
+            },
+          );
+        }
+
+        // Commit the transaction
+        await transaction.commit();
+        return true;
+      } catch (error) {
+        // Rollback on error
+        await transaction.rollback();
+        throw error;
       }
-
-      return true;
     } catch (error) {
       logger.error(
         "Error caching response",
@@ -179,6 +202,7 @@ const aiCacheService = {
 
   /**
    * Clear expired cache entries
+   * @returns Number of entries cleared
    */
   clearExpiredCache: async (): Promise<number> => {
     try {
@@ -208,6 +232,9 @@ const aiCacheService = {
 
   /**
    * Invalidate cache entries for a specific prompt or pattern
+   * @param promptPattern Pattern to match against prompts
+   * @param model Optional model to filter by
+   * @returns Number of entries invalidated
    */
   invalidateCache: async (
     promptPattern: string,
@@ -215,6 +242,16 @@ const aiCacheService = {
   ): Promise<number> => {
     if (!promptPattern) {
       logger.warn("invalidateCache called with empty promptPattern");
+      return 0;
+    }
+
+    // Validate promptPattern to prevent SQL injection
+    if (
+      promptPattern.includes(";") ||
+      promptPattern.includes("--") ||
+      promptPattern.includes("/*")
+    ) {
+      logger.error("Potential SQL injection attempt in invalidateCache");
       return 0;
     }
 
@@ -253,6 +290,8 @@ const aiCacheService = {
 
 /**
  * Create a cryptographic hash of the prompt for secure and efficient lookup
+ * @param text Text to hash
+ * @returns SHA-256 hash of the text
  */
 async function createHash(text: string): Promise<string> {
   // Use SHA-256 for production-grade hashing

@@ -10,7 +10,8 @@
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
     "preview": "vite preview",
     "dev:all": "node server/unified-server.js",
-    "migrate": "node scripts/run-migrations.js"
+    "migrate": "node scripts/run-mysql-migrations.js",
+    "migrate:fresh": "node scripts/run-mysql-migrations.js --fresh"
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.0",

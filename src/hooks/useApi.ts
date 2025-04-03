@@ -1,5 +1,6 @@
 import { useState, useCallback } from "react";
-import api from "@/services/axiosConfig";
+import { api } from "@/services/api/middleware/apiMiddleware";
+import logger from "@/utils/logger";
 
 interface ApiState<T> {
   data: T | null;
@@ -12,9 +13,16 @@ interface ApiHook<T, P> extends ApiState<T> {
   reset: () => void;
 }
 
+/**
+ * Custom hook for making API requests with standardized error handling and loading states
+ * @param endpoint API endpoint path
+ * @param method HTTP method to use
+ * @param initialData Optional initial data
+ * @returns API hook with execute function, data, loading state, and error handling
+ */
 function useApi<T = any, P = any>(
   endpoint: string,
-  method: "get" | "post" | "put" | "delete" = "get",
+  method: "get" | "post" | "put" | "patch" | "delete" = "get",
   initialData: T | null = null,
 ): ApiHook<T, P> {
   const [state, setState] = useState<ApiState<T>>({
@@ -40,20 +48,28 @@ function useApi<T = any, P = any>(
           case "put":
             response = await api.put<T>(endpoint, params);
             break;
+          case "patch":
+            response = await api.patch<T>(endpoint, params);
+            break;
           case "delete":
-            response = await api.delete<T>(endpoint, { data: params });
+            response = await api.delete<T>(endpoint, { params });
             break;
           default:
             throw new Error(`Unsupported method: ${method}`);
         }
 
-        setState({
-          data: response.data,
-          isLoading: false,
-          error: null,
-        });
+        // Check if response has the expected structure
+        if (response && response.data) {
+          setState({
+            data: response.data.data || response.data,
+            isLoading: false,
+            error: null,
+          });
 
-        return response.data;
+          return response.data.data || response.data;
+        } else {
+          throw new Error("Invalid API response format");
+        }
       } catch (error) {
         const errorMessage =
           error instanceof Error ? error.message : "An unknown error occurred";
@@ -65,9 +81,9 @@ function useApi<T = any, P = any>(
           error: apiError,
         });
 
-        console.error(
+        logger.error(
           `API Error (${method.toUpperCase()} ${endpoint}):`,
-          error,
+          error instanceof Error ? error : new Error(String(error)),
         );
         return null;
       }

@@ -11,6 +11,7 @@ import websocketService from "./websocketService";
 
 type NotificationCallback = (notification: any) => void;
 type TableChangeCallback = (payload: any) => void;
+export type SubscriptionCallback = (payload: any) => void;
 
 export interface RealtimeSubscription {
   unsubscribe: () => void;

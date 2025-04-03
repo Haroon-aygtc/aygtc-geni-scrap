@@ -25,6 +25,7 @@ import ResponseFormattingConfig, {
   initResponseFormattingConfig,
 } from "./ResponseFormattingConfig";
 import ResponseTemplate, { initResponseTemplate } from "./ResponseTemplate";
+import FollowUpQuestion, { initFollowUpQuestion } from "./FollowUpQuestion";
 
 // Initialize all models
 export const initializeModels = async () => {
@@ -44,6 +45,7 @@ export const initializeModels = async () => {
       initTopicBasedQuestion(),
       initResponseFormattingConfig(),
       initResponseTemplate(),
+      initFollowUpQuestion(),
     ]);
 
     // Define associations
@@ -85,6 +87,10 @@ export const initializeModels = async () => {
     TopicBasedQuestion.belongsTo(TopicBasedQuestionSet, {
       foreignKey: "set_id",
     });
+
+    // Add FollowUpQuestion associations
+    FollowUpConfig.hasMany(FollowUpQuestion, { foreignKey: "config_id" });
+    FollowUpQuestion.belongsTo(FollowUpConfig, { foreignKey: "config_id" });
 
     // Response formatting associations
     User.hasMany(ResponseFormattingConfig, { foreignKey: "user_id" });
@@ -217,6 +223,16 @@ export interface SystemSetting {
   updated_at: Date;
 }
 
+export interface FollowUpQuestionInterface {
+  id: string;
+  config_id: string;
+  question: string;
+  display_order: number;
+  is_active: boolean;
+  created_at: Date;
+  updated_at: Date;
+}
+
 // Export model classes
 export {
   User,
@@ -232,6 +248,7 @@ export {
   TopicBasedQuestion,
   ResponseFormattingConfig,
   ResponseTemplate,
+  FollowUpQuestion,
 };
 
 // Export a default object with all models
@@ -249,6 +266,7 @@ const models = {
   TopicBasedQuestion,
   ResponseFormattingConfig,
   ResponseTemplate,
+  FollowUpQuestion,
   initializeModels,
 };
 
