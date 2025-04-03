@@ -24,6 +24,12 @@ const getBoolEnv = (key: string, fallback: boolean = false): boolean => {
   return value === "true" || value === "1";
 };
 
+// Helper function to get integer environment variables
+const getIntEnv = (key: string, fallback: number = 0): number => {
+  const value = getEnv(key, String(fallback));
+  return parseInt(value, 10) || fallback;
+};
+
 export const env = {
   // App environment
   NODE_ENV: getEnv("NODE_ENV", "development"),
@@ -38,6 +44,16 @@ export const env = {
   MYSQL_USER: getEnv("MYSQL_USER", "root"),
   MYSQL_PASSWORD: getEnv("MYSQL_PASSWORD", ""),
   MYSQL_DATABASE: getEnv("MYSQL_DATABASE", "chat_app_dev"),
+  MYSQL_TEST_DATABASE: getEnv("MYSQL_TEST_DATABASE", "chat_app_test"),
+  MYSQL_SSL: getBoolEnv("MYSQL_SSL", false),
+  MYSQL_CERT: getEnv("MYSQL_CERT", ""),
+  MYSQL_LOGGING: getBoolEnv("MYSQL_LOGGING", false),
+
+  // MySQL connection pool settings
+  MYSQL_POOL_MAX: getIntEnv("MYSQL_POOL_MAX", 10),
+  MYSQL_POOL_MIN: getIntEnv("MYSQL_POOL_MIN", 0),
+  MYSQL_POOL_ACQUIRE: getIntEnv("MYSQL_POOL_ACQUIRE", 30000),
+  MYSQL_POOL_IDLE: getIntEnv("MYSQL_POOL_IDLE", 10000),
 
   // API configuration
   API_BASE_URL: getEnv("API_BASE_URL", "/api"),
@@ -48,6 +64,7 @@ export const env = {
   GEMINI_API_KEY: getEnv("GEMINI_API_KEY"),
   HUGGINGFACE_API_KEY: getEnv("HUGGINGFACE_API_KEY"),
   GROK_API_KEY: getEnv("GROK_API_KEY"),
+  JWT_SECRET: getEnv("JWT_SECRET", "your-secret-key"),
 
   // Server configuration
   PORT: getEnv("PORT", "5173"),
@@ -71,7 +88,7 @@ export const env = {
   },
 
   // Get all environment variables as an object
-  getAll: (): Record<string, string | boolean> => {
+  getAll: (): Record<string, string | boolean | number> => {
     return {
       NODE_ENV: env.NODE_ENV,
       MODE: env.MODE,
@@ -81,7 +98,16 @@ export const env = {
       MYSQL_HOST: env.MYSQL_HOST,
       MYSQL_PORT: env.MYSQL_PORT,
       MYSQL_USER: env.MYSQL_USER,
+      MYSQL_PASSWORD: env.MYSQL_PASSWORD,
       MYSQL_DATABASE: env.MYSQL_DATABASE,
+      MYSQL_TEST_DATABASE: env.MYSQL_TEST_DATABASE,
+      MYSQL_SSL: env.MYSQL_SSL,
+      MYSQL_CERT: env.MYSQL_CERT,
+      MYSQL_LOGGING: env.MYSQL_LOGGING,
+      MYSQL_POOL_MAX: env.MYSQL_POOL_MAX,
+      MYSQL_POOL_MIN: env.MYSQL_POOL_MIN,
+      MYSQL_POOL_ACQUIRE: env.MYSQL_POOL_ACQUIRE,
+      MYSQL_POOL_IDLE: env.MYSQL_POOL_IDLE,
       API_BASE_URL: env.API_BASE_URL,
       WEBSOCKET_URL: env.WEBSOCKET_URL,
       WS_AUTO_CONNECT: env.WS_AUTO_CONNECT,
@@ -93,6 +119,7 @@ export const env = {
       ENABLE_MOCK_MODE: env.ENABLE_MOCK_MODE,
       APP_VERSION: env.APP_VERSION,
       TEMPO: env.TEMPO,
+      JWT_SECRET: env.JWT_SECRET,
     };
   },
 };

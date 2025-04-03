@@ -1,5 +1,7 @@
-// This is the unified MySQL client implementation that will be used throughout the application
-// The server-side implementation in server/services/mysqlClient.js will be deprecated
+/**
+ * Unified MySQL client implementation
+ * Provides a consistent interface for database operations throughout the application
+ */
 
 import logger from "@/utils/logger";
 import { env } from "@/config/env";
@@ -84,39 +86,45 @@ export const initMySQL = async (): Promise<SequelizeLike> => {
       // Dynamically import Sequelize only on the server side
       const { Sequelize } = await import("sequelize");
 
+      // Get database configuration from environment variables
       const mysqlUrl = env.MYSQL_URL;
+      const mysqlHost = env.MYSQL_HOST;
+      const mysqlPort = parseInt(env.MYSQL_PORT, 10);
       const mysqlUser = env.MYSQL_USER;
       const mysqlPassword = env.MYSQL_PASSWORD;
       const mysqlDatabase = env.MYSQL_DATABASE;
+      const mysqlLogging = env.MYSQL_LOGGING;
 
-      if (!mysqlUrl && (!mysqlUser || !mysqlPassword || !mysqlDatabase)) {
+      // Pool configuration
+      const poolConfig = {
+        max: env.MYSQL_POOL_MAX,
+        min: env.MYSQL_POOL_MIN,
+        acquire: env.MYSQL_POOL_ACQUIRE,
+        idle: env.MYSQL_POOL_IDLE,
+      };
+
+      if (!mysqlUrl && (!mysqlHost || !mysqlUser || !mysqlDatabase)) {
         throw new Error("MySQL connection details are required");
       }
 
       if (mysqlUrl) {
         // Use connection URL if provided
         sequelize = new Sequelize(mysqlUrl, {
-          logging: env.NODE_ENV === "development" ? console.log : false,
+          logging: mysqlLogging ? console.log : false,
           dialect: "mysql",
-          pool: {
-            max: 10,
-            min: 0,
-            acquire: 30000,
-            idle: 10000,
-          },
+          pool: poolConfig,
         });
       } else {
         // Use individual connection parameters
         sequelize = new Sequelize(mysqlDatabase, mysqlUser, mysqlPassword, {
-          host: env.MYSQL_HOST || "localhost",
-          port: parseInt(env.MYSQL_PORT || "3306"),
+          host: mysqlHost,
+          port: mysqlPort,
           dialect: "mysql",
-          logging: env.NODE_ENV === "development" ? console.log : false,
-          pool: {
-            max: 10,
-            min: 0,
-            acquire: 30000,
-            idle: 10000,
+          logging: mysqlLogging ? console.log : false,
+          pool: poolConfig,
+          dialectOptions: {
+            bigNumberStrings: true,
+            ssl: env.MYSQL_SSL ? { ca: env.MYSQL_CERT } : undefined,
           },
         });
       }

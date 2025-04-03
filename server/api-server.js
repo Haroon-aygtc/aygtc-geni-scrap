@@ -96,7 +96,7 @@ app.post("/api/auth/register", async (req, res) => {
     }
 
     // Hash the password
-    const bcrypt = require("bcryptjs");
+    const bcrypt = await import("bcryptjs");
     const salt = await bcrypt.genSalt(10);
     const hashedPassword = await bcrypt.hash(password, salt);
 
@@ -146,7 +146,7 @@ app.post("/api/auth/login", async (req, res) => {
     const user = users[0];
 
     // Verify password
-    const bcrypt = require("bcryptjs");
+    const bcrypt = await import("bcryptjs");
     const isMatch = await bcrypt.compare(password, user.password);
 
     if (!isMatch) {
@@ -154,7 +154,7 @@ app.post("/api/auth/login", async (req, res) => {
     }
 
     // Generate JWT token
-    const jwt = require("jsonwebtoken");
+    const jwt = await import("jsonwebtoken");
     const token = jwt.sign(
       { id: user.id, email: user.email, role: user.role },
       process.env.JWT_SECRET || "your-secret-key",
