@@ -1,5 +1,6 @@
 import { getMySQLClient } from "./mysqlClient";
 import logger from "@/utils/logger";
+import crypto from "crypto";
 
 interface CacheEntry {
   prompt: string;
@@ -21,6 +22,11 @@ const aiCacheService = {
     prompt: string,
     model?: string,
   ): Promise<CacheEntry | null> => {
+    if (!prompt) {
+      logger.warn("getCachedResponse called with empty prompt");
+      return null;
+    }
+
     try {
       // Create a hash of the prompt for efficient lookup
       const promptHash = await createHash(prompt);
@@ -29,7 +35,7 @@ const aiCacheService = {
       const sequelize = await getMySQLClient();
 
       // Find cache entry in database
-      const [cacheEntry] = await sequelize.query(
+      const [cacheEntries] = await sequelize.query(
         `SELECT * FROM ai_response_cache 
          WHERE prompt_hash = ? AND model_used = ? AND expires_at > ?`,
         {
@@ -38,18 +44,33 @@ const aiCacheService = {
         },
       );
 
+      // Handle array result properly
+      const cacheEntry = Array.isArray(cacheEntries)
+        ? cacheEntries[0]
+        : cacheEntries;
+
       if (!cacheEntry) {
         return null;
+      }
+
+      // Safely parse metadata
+      let parsedMetadata = {};
+      if (cacheEntry.metadata) {
+        try {
+          parsedMetadata =
+            typeof cacheEntry.metadata === "string"
+              ? JSON.parse(cacheEntry.metadata)
+              : cacheEntry.metadata;
+        } catch (parseError) {
+          logger.warn("Failed to parse cache entry metadata", parseError);
+        }
       }
 
       return {
         prompt: cacheEntry.prompt,
         response: cacheEntry.response,
         modelUsed: cacheEntry.model_used,
-        metadata:
-          typeof cacheEntry.metadata === "string"
-            ? JSON.parse(cacheEntry.metadata)
-            : cacheEntry.metadata,
+        metadata: parsedMetadata,
         createdAt: new Date(cacheEntry.created_at).toISOString(),
         expiresAt: new Date(cacheEntry.expires_at).toISOString(),
       };
@@ -72,6 +93,15 @@ const aiCacheService = {
     metadata?: Record<string, any>,
     ttlSeconds: number = 3600, // Default TTL: 1 hour
   ): Promise<boolean> => {
+    if (!prompt || !response) {
+      logger.warn("cacheResponse called with empty prompt or response");
+      return false;
+    }
+
+    if (!model) {
+      model = "default";
+    }
+
     try {
       // Create a hash of the prompt for efficient lookup
       const promptHash = await createHash(prompt);
@@ -80,8 +110,11 @@ const aiCacheService = {
       const expiresAt = new Date(now.getTime() + ttlSeconds * 1000);
       const sequelize = await getMySQLClient();
 
+      // Prepare metadata for storage
+      const metadataJson = JSON.stringify(metadata || {});
+
       // Check if entry already exists
-      const [existingEntry] = await sequelize.query(
+      const [existingEntries] = await sequelize.query(
         `SELECT id FROM ai_response_cache 
          WHERE prompt_hash = ? AND model_used = ?`,
         {
@@ -89,6 +122,11 @@ const aiCacheService = {
           type: sequelize.QueryTypes.SELECT,
         },
       );
+
+      // Handle array result properly
+      const existingEntry = Array.isArray(existingEntries)
+        ? existingEntries[0]
+        : existingEntries;
 
       if (existingEntry) {
         // Update existing cache entry
@@ -99,7 +137,7 @@ const aiCacheService = {
           {
             replacements: [
               response,
-              JSON.stringify(metadata || {}),
+              metadataJson,
               now,
               expiresAt,
               existingEntry.id,
@@ -119,7 +157,7 @@ const aiCacheService = {
               promptHash,
               response,
               model,
-              JSON.stringify(metadata || {}),
+              metadataJson,
               now,
               now,
               expiresAt,
@@ -156,7 +194,9 @@ const aiCacheService = {
         },
       );
 
-      return result?.affectedRows || 0;
+      const affectedRows = result?.affectedRows || 0;
+      logger.info(`Cleared ${affectedRows} expired cache entries`);
+      return affectedRows;
     } catch (error) {
       logger.error(
         "Error clearing expired cache",
@@ -173,8 +213,15 @@ const aiCacheService = {
     promptPattern: string,
     model?: string,
   ): Promise<number> => {
+    if (!promptPattern) {
+      logger.warn("invalidateCache called with empty promptPattern");
+      return 0;
+    }
+
     try {
       const sequelize = await getMySQLClient();
+
+      // Use parameterized queries to prevent SQL injection
       let query = `DELETE FROM ai_response_cache WHERE prompt LIKE ?`;
       const replacements = [`%${promptPattern}%`];
 
@@ -189,7 +236,11 @@ const aiCacheService = {
         type: sequelize.QueryTypes.DELETE,
       });
 
-      return result?.affectedRows || 0;
+      const affectedRows = result?.affectedRows || 0;
+      logger.info(
+        `Invalidated ${affectedRows} cache entries matching pattern: ${promptPattern}`,
+      );
+      return affectedRows;
     } catch (error) {
       logger.error(
         "Error invalidating cache",
@@ -201,19 +252,11 @@ const aiCacheService = {
 };
 
 /**
- * Create a simple hash of the prompt for efficient lookup
- * In a production environment, consider using a more robust hashing algorithm
+ * Create a cryptographic hash of the prompt for secure and efficient lookup
  */
 async function createHash(text: string): Promise<string> {
-  // Simple hash function for demo purposes
-  // In production, use a proper crypto hash function
-  let hash = 0;
-  for (let i = 0; i < text.length; i++) {
-    const char = text.charCodeAt(i);
-    hash = (hash << 5) - hash + char;
-    hash = hash & hash; // Convert to 32bit integer
-  }
-  return hash.toString(16);
+  // Use SHA-256 for production-grade hashing
+  return crypto.createHash("sha256").update(text).digest("hex");
 }
 
 export default aiCacheService;
