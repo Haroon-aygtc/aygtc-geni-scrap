@@ -1,90 +1,49 @@
 /**
- * Unified MySQL client implementation
+ * Production-ready MySQL client implementation
  * Provides a consistent interface for database operations throughout the application
  */
 
 import logger from "@/utils/logger";
 import { env } from "@/config/env";
 
-// Define a type for the Sequelize-like interface
-export interface SequelizeLike {
-  query: (sql: string, options: any) => Promise<any[]>;
-  QueryTypes: {
-    SELECT: string;
-    INSERT: string;
-    UPDATE: string;
-    DELETE: string;
-  };
-  authenticate: () => Promise<void>;
-  close: () => void;
-  Op?: any;
-  transaction: () => Promise<any>;
-}
-
-// Create a dummy implementation for browser environments
-const dummySequelize: SequelizeLike = {
-  query: async () => {
-    console.warn("MySQL client methods called in browser environment");
-    return [];
-  },
-  QueryTypes: {
-    SELECT: "SELECT",
-    INSERT: "INSERT",
-    UPDATE: "UPDATE",
-    DELETE: "DELETE",
-  },
-  authenticate: async () => {
-    console.warn("MySQL client methods called in browser environment");
-  },
-  close: () => {
-    console.warn("MySQL client methods called in browser environment");
-  },
-  Op: {
-    eq: "=",
-    ne: "!=",
-    gt: ">",
-    lt: "<",
-    gte: ">=",
-    lte: "<=",
-    in: "IN",
-    notIn: "NOT IN",
-    like: "LIKE",
-    notLike: "NOT LIKE",
-    between: "BETWEEN",
-    notBetween: "NOT BETWEEN",
-    and: "AND",
-    or: "OR",
-  },
-  transaction: async () => {
-    console.warn("MySQL transaction called in browser environment");
-    return {
-      commit: async () => {},
-      rollback: async () => {},
-    };
-  },
+// Define QueryTypes for use in query operations
+export const QueryTypes = {
+  SELECT: "SELECT",
+  INSERT: "INSERT",
+  UPDATE: "UPDATE",
+  DELETE: "DELETE",
 };
-
-// Placeholder for the Sequelize instance
-let sequelize: SequelizeLike | null = null;
 
 // Check if we're in a browser environment
 const isBrowser = typeof window !== "undefined";
 
+// Define the interface for our Sequelize client
+export interface SequelizeClient {
+  query: (sql: string, options: any) => Promise<any[]>;
+  authenticate: () => Promise<void>;
+  close: () => void;
+  Op?: any;
+  transaction: (options?: any) => Promise<any>;
+}
+
+// Placeholder for the Sequelize instance
+let sequelizeInstance: SequelizeClient | null = null;
+
 /**
- * Initialize the MySQL client with error handling and retry logic
+ * Initialize the MySQL client
  * @returns Initialized Sequelize client
  */
-export const initMySQL = async (): Promise<SequelizeLike> => {
-  // For browser environments, return the dummy implementation
+export const initMySQL = async (): Promise<SequelizeClient> => {
   if (isBrowser) {
-    return dummySequelize;
+    throw new Error(
+      "MySQL client cannot be initialized in browser environment",
+    );
   }
 
-  if (!sequelize) {
-    // Server-side initialization
+  if (!sequelizeInstance) {
     try {
       // Dynamically import Sequelize only on the server side
-      const { Sequelize } = await import("sequelize");
+      const { Sequelize, Op } = await import("sequelize");
 
       // Get database configuration from environment variables
       const mysqlUrl = env.MYSQL_URL;
@@ -106,6 +65,8 @@ export const initMySQL = async (): Promise<SequelizeLike> => {
       if (!mysqlUrl && (!mysqlHost || !mysqlUser || !mysqlDatabase)) {
         throw new Error("MySQL connection details are required");
       }
+
+      let sequelize;
 
       if (mysqlUrl) {
         // Use connection URL if provided
@@ -129,32 +90,36 @@ export const initMySQL = async (): Promise<SequelizeLike> => {
         });
       }
 
+      // Add Op to the sequelize instance
+      sequelize.Op = Op;
+
       // Test the connection
       await sequelize.authenticate();
       logger.info("MySQL client initialized and connected successfully");
+
+      sequelizeInstance = sequelize;
     } catch (error) {
       logger.error("Failed to initialize MySQL client", error);
       throw error;
     }
   }
 
-  return sequelize;
+  return sequelizeInstance;
 };
 
 /**
  * Get the MySQL client instance
  * @returns Sequelize client instance
  */
-export const getMySQLClient = async (): Promise<SequelizeLike> => {
-  // For browser environments, return the dummy implementation
+export const getMySQLClient = async (): Promise<SequelizeClient> => {
   if (isBrowser) {
-    return dummySequelize;
+    throw new Error("MySQL client cannot be used in browser environment");
   }
 
-  if (!sequelize) {
+  if (!sequelizeInstance) {
     return await initMySQL();
   }
-  return sequelize;
+  return sequelizeInstance;
 };
 
 /**
@@ -162,15 +127,14 @@ export const getMySQLClient = async (): Promise<SequelizeLike> => {
  * Useful for testing or when changing connection details
  */
 export const resetMySQLClient = (): void => {
-  // Do nothing in browser environments
   if (isBrowser) {
     return;
   }
 
-  if (sequelize) {
-    sequelize.close();
+  if (sequelizeInstance) {
+    sequelizeInstance.close();
   }
-  sequelize = null;
+  sequelizeInstance = null;
 };
 
 /**
@@ -178,12 +142,11 @@ export const resetMySQLClient = (): void => {
  * @returns Boolean indicating if the client is initialized
  */
 export const isMySQLInitialized = (): boolean => {
-  // Always return true in browser environments
   if (isBrowser) {
-    return true;
+    return false;
   }
 
-  return !!sequelize;
+  return !!sequelizeInstance;
 };
 
 /**
@@ -191,9 +154,8 @@ export const isMySQLInitialized = (): boolean => {
  * @returns Promise that resolves if connection is successful
  */
 export const testConnection = async (): Promise<boolean> => {
-  // Always return true in browser environments
   if (isBrowser) {
-    return true;
+    throw new Error("MySQL connection cannot be tested in browser environment");
   }
 
   try {
@@ -214,6 +176,7 @@ const mysql = {
   resetMySQLClient,
   isMySQLInitialized,
   testConnection,
+  QueryTypes,
 };
 
 export default mysql;
