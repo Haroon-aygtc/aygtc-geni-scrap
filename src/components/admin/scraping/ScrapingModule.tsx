@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -63,19 +63,27 @@ import {
   AccordionTrigger,
 } from "@/components/ui/accordion";
 import { Textarea } from "@/components/ui/textarea";
+import { Progress } from "@/components/ui/progress";
 import WebPreview from "./WebPreview";
 import URLManager from "./URLManager";
 import DatabaseConfigPanel from "./DatabaseConfigPanel";
+import SelectorTool from "./SelectorTool";
 import {
   SelectorConfig,
   ScrapingResult,
   DatabaseConfig,
-  scrapeMultipleUrls,
-  saveToDatabase,
-  saveToFile,
 } from "@/services/scrapingService";
-import { v4 as uuidv4 } from "uuid";
-import axios from "axios";
+import scrapingService from "@/services/scrapingService";
+
+interface Project {
+  id: string;
+  name: string;
+  urls: string[];
+  selectors: SelectorConfig[];
+  databaseConfig?: DatabaseConfig;
+  lastRun?: string;
+  results?: ScrapingResult[];
+}
 
 const ScrapingModule: React.FC = () => {
   const { toast } = useToast();
@@ -114,6 +122,44 @@ const ScrapingModule: React.FC = () => {
   const [cookiesEnabled, setCookiesEnabled] = useState(false);
   const [cookies, setCookies] = useState("");
   const [captureScreenshot, setCaptureScreenshot] = useState(false);
+  const [showSelectorTool, setShowSelectorTool] = useState(false);
+  const [selectorToolPosition, setSelectorToolPosition] = useState({ x: 100, y: 100 });
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [currentProject, setCurrentProject] = useState<Project | null>(null);
+  const [projectName, setProjectName] = useState("New Scraping Project");
+  const [scrapingProgress, setScrapingProgress] = useState(0);
+  const [testResults, setTestResults] = useState<{[key: string]: any}>({});
+  const [selectedSelectorForTest, setSelectedSelectorForTest] = useState<string | null>(null);
+  
+  const iframeRef = useRef<HTMLIFrameElement>(null);
+
+  // Load projects from localStorage on component mount
+  useEffect(() => {
+    const savedProjects = localStorage.getItem("scraping-projects");
+    if (savedProjects) {
+      try {
+        const parsedProjects = JSON.parse(savedProjects);
+        setProjects(parsedProjects);
+        
+        // If there's at least one project, set it as current
+        if (parsedProjects.length > 0) {
+          const lastProject = parsedProjects[parsedProjects.length - 1];
+          setCurrentProject(lastProject);
+          setUrls(lastProject.urls || []);
+          setSelectors(lastProject.selectors || []);
+          setProjectName(lastProject.name);
+          if (lastProject.databaseConfig) {
+            setDbConfig(lastProject.databaseConfig);
+          }
+          if (lastProject.results) {
+            setResults(lastProject.results);
+          }
+        }
+      } catch (error) {
+        console.error("Error loading projects:", error);
+      }
+    }
+  }, []);
 
   // Set active URL for preview
   const previewUrl = (url: string) => {
@@ -134,14 +180,15 @@ const ScrapingModule: React.FC = () => {
 
   // Create a new selector
   const createNewSelector = () => {
-    const newSelector: SelectorConfig = {
-      id: uuidv4(),
-      name: `Selector ${selectors.length + 1}`,
-      selector: "",
-      type: "text",
-    };
-    setSelectedSelector(newSelector);
-    setIsEditingSelector(false);
+    if (!activeUrl) {
+      toast({
+        title: "No URL Selected",
+        description: "Please preview a URL before adding selectors",
+        variant: "destructive"
+      });
+      return;
+    }
+    setShowSelectorTool(true);
   };
 
   // Edit selector
@@ -211,6 +258,132 @@ const ScrapingModule: React.FC = () => {
     });
   };
 
+  // Test selector against current URL
+  const testSelector = async (selectorId: string) => {
+    if (!activeUrl) {
+      toast({
+        title: "No URL Selected",
+        description: "Please preview a URL before testing selectors",
+        variant: "destructive"
+      });
+      return;
+    }
+    
+    const selector = selectors.find(s => s.id === selectorId);
+    if (!selector) return;
+    
+    setSelectedSelectorForTest(selectorId);
+    
+    try {
+      const result = await scrapingService.testSelector(activeUrl, selector);
+      setTestResults({
+        ...testResults,
+        [selectorId]: result
+      });
+      
+      toast({
+        title: result.success ? "Test Successful" : "Test Failed",
+        description: result.success 
+          ? "Selector successfully extracted data" 
+          : `Test failed: ${result.error || "Unknown error"}`,
+        variant: result.success ? "default" : "destructive"
+      });
+    } catch (error) {
+      toast({
+        title: "Test Failed",
+        description: "Failed to test selector. Please try again.",
+        variant: "destructive"
+      });
+    } finally {
+      setSelectedSelectorForTest(null);
+    }
+  };
+
+  // Save current project
+  const saveCurrentProject = () => {
+    if (!projectName.trim()) {
+      toast({
+        title: "Project Name Required",
+        description: "Please enter a name for your project",
+        variant: "destructive"
+      });
+      return;
+    }
+
+    const projectToSave: Project = {
+      id: currentProject?.id || `project_${Date.now()}`,
+      name: projectName,
+      urls,
+      selectors,
+      databaseConfig: dbConfig || undefined,
+      lastRun: currentProject?.lastRun,
+      results: results.length > 0 ? results : currentProject?.results
+    };
+
+    let updatedProjects: Project[];
+    
+    if (currentProject && projects.some(p => p.id === projectToSave.id)) {
+      // Update existing project
+      updatedProjects = projects.map(p => 
+        p.id === projectToSave.id ? projectToSave : p
+      );
+    } else {
+      // Create new project
+      updatedProjects = [...projects, projectToSave];
+    }
+
+    setProjects(updatedProjects);
+    setCurrentProject(projectToSave);
+    localStorage.setItem("scraping-projects", JSON.stringify(updatedProjects));
+    
+    toast({
+      title: "Project Saved",
+      description: `Project "${projectName}" has been saved successfully`
+    });
+  };
+
+  // Create new project
+  const createNewProject = () => {
+    setCurrentProject(null);
+    setUrls(["https://example.com"]);
+    setSelectors([]);
+    setProjectName("New Scraping Project");
+    setDbConfig(null);
+    setResults([]);
+    setActiveTab("urls");
+    setActiveUrl("");
+  };
+
+  // Load existing project
+  const loadProject = (project: Project) => {
+    setCurrentProject(project);
+    setUrls(project.urls || []);
+    setSelectors(project.selectors || []);
+    setProjectName(project.name);
+    setDbConfig(project.databaseConfig || null);
+    setResults(project.results || []);
+  };
+
+  // Delete project
+  const deleteProject = (projectId: string) => {
+    const updatedProjects = projects.filter(p => p.id !== projectId);
+    setProjects(updatedProjects);
+    localStorage.setItem("scraping-projects", JSON.stringify(updatedProjects));
+    
+    if (currentProject?.id === projectId) {
+      if (updatedProjects.length > 0) {
+        loadProject(updatedProjects[0]);
+      } else {
+        createNewProject();
+      }
+    }
+    
+    toast({
+      title: "Project Deleted",
+      description: "The project has been deleted successfully"
+    });
+  };
+
   // Start scraping
   const startScraping = async () => {
     // Validate inputs
@@ -236,6 +409,7 @@ const ScrapingModule: React.FC = () => {
     try {
       setIsLoading(true);
       setResults([]);
+      setScrapingProgress(0);
 
       // Parse request headers if provided
       let headers = {};
@@ -269,6 +443,14 @@ const ScrapingModule: React.FC = () => {
         }
       }
 
+      // Set up progress updates
+      const progressInterval = setInterval(() => {
+        setScrapingProgress(prev => {
+          const newProgress = prev + 5;
+          return newProgress >= 90 ? 90 : newProgress;
+        });
+      }, 500);
+
       // Prepare scraping targets
       const targets = validUrls.map((url) => ({
         url,
@@ -295,9 +477,29 @@ const ScrapingModule: React.FC = () => {
       }));
 
       // Call the API to scrape the URLs
-      const response = await axios.post("/api/scraping/scrape", { targets });
-      const scrapingResults = response.data;
+      const scrapingResults = await scrapingService.scrapeMultipleUrls(targets);
+      clearInterval(progressInterval);
+      setScrapingProgress(100);
       setResults(scrapingResults);
+
+      // Update current project with results
+      if (currentProject) {
+        const updatedProject = {
+          ...currentProject,
+          lastRun: new Date().toISOString(),
+          results: scrapingResults
+        };
+        
+        setCurrentProject(updatedProject);
+        
+        // Update projects list
+        const updatedProjects = projects.map(p => 
+          p.id === updatedProject.id ? updatedProject : p
+        );
+        
+        setProjects(updatedProjects);
+        localStorage.setItem("scraping-projects", JSON.stringify(updatedProjects));
+      }
 
       // Show success message
       const successCount = scrapingResults.filter(
@@ -342,16 +544,15 @@ const ScrapingModule: React.FC = () => {
     try {
       setIsLoading(true);
 
+      // Generate filename
+      const filename = `scraping_results_${new Date().toISOString().replace(/[:.]/g, "-")}`;
+      
       // Call the API to save the results to a file
-      const response = await axios.post("/api/scraping/save-file", {
-        results,
-        filename: `scraping_results_${new Date().toISOString().replace(/[:.]/g, "-")}.${exportFormat}`,
-        format: exportFormat,
-      });
+      const filePath = await scrapingService.saveToFile(results, filename, exportFormat as any);
 
       toast({
         title: "Results Saved",
-        description: `Results saved to ${response.data.filePath}`,
+        description: `Results saved to ${filePath}`,
       });
     } catch (error) {
       console.error("Error saving results:", error);
@@ -392,10 +593,7 @@ const ScrapingModule: React.FC = () => {
       setIsLoading(true);
 
       // Call the API to save the results to the database
-      const response = await axios.post("/api/scraping/save-db", {
-        results,
-        dbConfig,
-      });
+      await scrapingService.saveToDatabase(results, dbConfig);
 
       toast({
         title: "Results Saved to Database",
@@ -429,904 +627,519 @@ const ScrapingModule: React.FC = () => {
     <div className="container mx-auto py-6 space-y-6">
       <Card>
         <CardHeader>
-          <CardTitle>Web Scraping Module</CardTitle>
-          <CardDescription>
-            Extract structured data from websites with real-time visualization
-            and selection tools
-          </CardDescription>
+          <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+            <div>
+              <CardTitle>
+                <input
+                  type="text"
+                  value={projectName}
+                  onChange={(e) => setProjectName(e.target.value)}
+                  className="text-xl font-semibold bg-transparent border-0 border-b border-transparent hover:border-gray-300 focus:border-primary focus:ring-0 px-1 py-0.5 w-full"
+                  placeholder="Project Name"
+                />
+              </CardTitle>
+              <CardDescription>
+                Extract structured data from websites with real-time visualization
+                and selection tools
+              </CardDescription>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <Button variant="outline" onClick={createNewProject} size="sm">
+                New Project
+              </Button>
+              <Button variant="outline" onClick={saveCurrentProject} size="sm">
+                <Save size={16} className="mr-1" />
+                Save Project
+              </Button>
+              <Button 
+                variant="default" 
+                onClick={startScraping} 
+                size="sm"
+                disabled={isLoading || urls.filter(u => u.trim()).length === 0 || selectors.length === 0}
+              >
+                {isLoading ? (
+                  <>
+                    <Loader2 size={16} className="mr-1 animate-spin" />
+                    Scraping...
+                  </>
+                ) : (
+                  <>
+                    <Play size={16} className="mr-1" />
+                    Start Scraping
+                  </>
+                )}
+              </Button>
+            </div>
+          </div>
+          
+          {currentProject?.lastRun && (
+            <div className="flex flex-wrap gap-2 mt-2">
+              <Badge variant="outline" className="text-xs">
+                Last run: {new Date(currentProject.lastRun).toLocaleString()}
+              </Badge>
+              <Badge variant="outline" className="text-xs">
+                {urls.filter(u => u.trim()).length} URL{urls.filter(u => u.trim()).length !== 1 ? "s" : ""}
+              </Badge>
+              <Badge variant="outline" className="text-xs">
+                {selectors.length} Selector{selectors.length !== 1 ? "s" : ""}
+              </Badge>
+            </div>
+          )}
         </CardHeader>
+        
+        {isLoading && (
+          <div className="px-6 pb-2">
+            <Progress value={scrapingProgress} className="h-2" />
+            <p className="text-xs text-center mt-1 text-muted-foreground">
+              Scraping in progress: {scrapingProgress}%
+            </p>
+          </div>
+        )}
+        
         <CardContent>
-          <Tabs value={activeTab} onValueChange={setActiveTab}>
-            <TabsList className="grid grid-cols-5 mb-6">
-              <TabsTrigger value="urls">URLs</TabsTrigger>
-              <TabsTrigger value="selectors">Selectors</TabsTrigger>
-              <TabsTrigger value="preview">Preview & Select</TabsTrigger>
-              <TabsTrigger value="results">Results</TabsTrigger>
-              <TabsTrigger value="storage">Storage Options</TabsTrigger>
-            </TabsList>
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-4">
+            <div className="md:col-span-1 border rounded-md p-3 max-h-[300px] overflow-y-auto">
+              <h3 className="font-medium mb-2">Projects</h3>
+              {projects.length === 0 ? (
+                <p className="text-sm text-muted-foreground">No saved projects</p>
+              ) : (
+                <ul className="space-y-1">
+                  {projects.map(project => (
+                    <li 
+                      key={project.id} 
+                      className={`flex items-center justify-between p-2 rounded-md text-sm cursor-pointer ${currentProject?.id === project.id ? 'bg-primary/10' : 'hover:bg-muted'}`}
+                      onClick={() => loadProject(project)}
+                    >
+                      <span className="truncate">{project.name}</span>
+                      <Button 
+                        variant="ghost" 
+                        size="icon" 
+                        className="h-6 w-6 text-muted-foreground hover:text-destructive"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          deleteProject(project.id);
+                        }}
+                      >
+                        <X size={14} />
+                      </Button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+            
+            <div className="md:col-span-3">
+              <Tabs value={activeTab} onValueChange={setActiveTab}>
+                <TabsList className="grid grid-cols-5 mb-6">
+                  <TabsTrigger value="urls">URLs</TabsTrigger>
+                  <TabsTrigger value="selectors">Selectors</TabsTrigger>
+                  <TabsTrigger value="preview">Preview & Select</TabsTrigger>
+                  <TabsTrigger value="results">Results</TabsTrigger>
+                  <TabsTrigger value="storage">Storage Options</TabsTrigger>
+                </TabsList>
 
-            {/* URLs Tab */}
-            <TabsContent value="urls" className="space-y-4">
-              <URLManager
-                urls={urls}
-                onUrlsChange={setUrls}
-                onPreviewUrl={previewUrl}
-              />
+                {/* URLs Tab */}
+                <TabsContent value="urls" className="space-y-4">
+                  <URLManager
+                    urls={urls}
+                    onUrlsChange={setUrls}
+                    onPreviewUrl={previewUrl}
+                  />
 
-              <Card className="mt-6">
-                <CardHeader>
-                  <CardTitle className="text-lg flex items-center gap-2">
-                    <Settings size={18} />
-                    Advanced Request Options
-                  </CardTitle>
-                  <CardDescription>
-                    Configure how requests are made to the target websites
-                  </CardDescription>
-                </CardHeader>
-                <CardContent>
-                  <Accordion type="single" collapsible className="w-full">
-                    <AccordionItem value="request-options">
-                      <AccordionTrigger>Request Configuration</AccordionTrigger>
-                      <AccordionContent>
-                        <div className="space-y-4">
-                          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                            <div className="space-y-2">
-                              <Label htmlFor="request-method">
-                                Request Method
-                              </Label>
-                              <Select
-                                value={requestMethod}
-                                onValueChange={setRequestMethod}
-                              >
-                                <SelectTrigger id="request-method">
-                                  <SelectValue placeholder="Select method" />
-                                </SelectTrigger>
-                                <SelectContent>
-                                  <SelectItem value="GET">GET</SelectItem>
-                                  <SelectItem value="POST">POST</SelectItem>
-                                  <SelectItem value="PUT">PUT</SelectItem>
-                                  <SelectItem value="DELETE">DELETE</SelectItem>
-                                </SelectContent>
-                              </Select>
-                            </div>
+                  <Card className="mt-6">
+                    <CardHeader>
+                      <CardTitle className="text-lg flex items-center gap-2">
+                        <Settings size={18} />
+                        Advanced Request Options
+                      </CardTitle>
+                      <CardDescription>
+                        Configure how requests are made to the target websites
+                      </CardDescription>
+                    </CardHeader>
+                    <CardContent>
+                      <Accordion type="single" collapsible className="w-full">
+                        <AccordionItem value="request-options">
+                          <AccordionTrigger>Request Configuration</AccordionTrigger>
+                          <AccordionContent>
+                            <div className="space-y-4">
+                              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <div className="space-y-2">
+                                  <Label htmlFor="request-method">
+                                    Request Method
+                                  </Label>
+                                  <Select
+                                    value={requestMethod}
+                                    onValueChange={setRequestMethod}
+                                  >
+                                    <SelectTrigger id="request-method">
+                                      <SelectValue placeholder="Select method" />
+                                    </SelectTrigger>
+                                    <SelectContent>
+                                      <SelectItem value="GET">GET</SelectItem>
+                                      <SelectItem value="POST">POST</SelectItem>
+                                      <SelectItem value="PUT">PUT</SelectItem>
+                                      <SelectItem value="DELETE">DELETE</SelectItem>
+                                    </SelectContent>
+                                  </Select>
+                                </div>
 
-                            <div className="space-y-2">
-                              <Label htmlFor="follow-redirects">
-                                Follow Redirects
-                              </Label>
-                              <div className="flex items-center space-x-2">
-                                <Switch
-                                  id="follow-redirects"
-                                  checked={followRedirects}
-                                  onCheckedChange={setFollowRedirects}
-                                />
-                                <Label htmlFor="follow-redirects">
-                                  {followRedirects ? "Enabled" : "Disabled"}
-                                </Label>
+                                <div className="space-y-2">
+                                  <Label htmlFor="follow-redirects">
+                                    Follow Redirects
+                                  </Label>
+                                  <div className="flex items-center space-x-2">
+                                    <Switch
+                                      id="follow-redirects"
+                                      checked={followRedirects}
+                                      onCheckedChange={setFollowRedirects}
+                                    />
+                                    <Label htmlFor="follow-redirects">
+                                      {followRedirects ? "Enabled" : "Disabled"}
+                                    </Label>
+                                  </div>
+                                </div>
                               </div>
-                            </div>
-                          </div>
 
-                          <div className="space-y-2">
-                            <Label htmlFor="request-headers">
-                              Request Headers (JSON)
-                            </Label>
-                            <Textarea
-                              id="request-headers"
-                              value={requestHeaders}
-                              onChange={(e) =>
-                                setRequestHeaders(e.target.value)
-                              }
-                              placeholder='{"User-Agent": "Mozilla/5.0", "Accept": "text/html"}'
-                              className="font-mono text-sm"
-                              rows={5}
-                            />
-                          </div>
-
-                          {requestMethod !== "GET" && (
-                            <div className="space-y-2">
-                              <Label htmlFor="request-body">
-                                Request Body (JSON)
-                              </Label>
-                              <Textarea
-                                id="request-body"
-                                value={requestBody}
-                                onChange={(e) => setRequestBody(e.target.value)}
-                                placeholder='{"key": "value"}'
-                                className="font-mono text-sm"
-                                rows={5}
-                              />
-                            </div>
-                          )}
-                        </div>
-                      </AccordionContent>
-                    </AccordionItem>
-
-                    <AccordionItem value="browser-options">
-                      <AccordionTrigger>Browser Behavior</AccordionTrigger>
-                      <AccordionContent>
-                        <div className="space-y-4">
-                          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                            <div className="space-y-2">
-                              <Label htmlFor="enable-javascript">
-                                JavaScript
-                              </Label>
-                              <div className="flex items-center space-x-2">
-                                <Switch
-                                  id="enable-javascript"
-                                  checked={enableJavaScript}
-                                  onCheckedChange={setEnableJavaScript}
-                                />
-                                <Label htmlFor="enable-javascript">
-                                  {enableJavaScript ? "Enabled" : "Disabled"}
+                              <div className="space-y-2">
+                                <Label htmlFor="request-headers">
+                                  Request Headers (JSON)
                                 </Label>
-                              </div>
-                            </div>
-
-                            <div className="space-y-2">
-                              <Label htmlFor="capture-screenshot">
-                                Capture Screenshot
-                              </Label>
-                              <div className="flex items-center space-x-2">
-                                <Switch
-                                  id="capture-screenshot"
-                                  checked={captureScreenshot}
-                                  onCheckedChange={setCaptureScreenshot}
-                                />
-                                <Label htmlFor="capture-screenshot">
-                                  {captureScreenshot ? "Enabled" : "Disabled"}
-                                </Label>
-                              </div>
-                            </div>
-                          </div>
-
-                          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                            <div className="space-y-2">
-                              <Label htmlFor="preview-device">
-                                Device Emulation
-                              </Label>
-                              <Select
-                                value={previewDevice}
-                                onValueChange={setPreviewDevice}
-                              >
-                                <SelectTrigger id="preview-device">
-                                  <SelectValue placeholder="Select device" />
-                                </SelectTrigger>
-                                <SelectContent>
-                                  <SelectItem value="desktop">
-                                    Desktop
-                                  </SelectItem>
-                                  <SelectItem value="mobile">Mobile</SelectItem>
-                                  <SelectItem value="tablet">Tablet</SelectItem>
-                                </SelectContent>
-                              </Select>
-                            </div>
-
-                            <div className="space-y-2">
-                              <Label htmlFor="preview-width">
-                                Viewport Width
-                              </Label>
-                              <Input
-                                id="preview-width"
-                                type="number"
-                                value={previewWidth}
-                                onChange={(e) =>
-                                  setPreviewWidth(
-                                    parseInt(e.target.value) || 1024,
-                                  )
-                                }
-                              />
-                            </div>
-
-                            <div className="space-y-2">
-                              <Label htmlFor="preview-height">
-                                Viewport Height
-                              </Label>
-                              <Input
-                                id="preview-height"
-                                type="number"
-                                value={previewHeight}
-                                onChange={(e) =>
-                                  setPreviewHeight(
-                                    parseInt(e.target.value) || 600,
-                                  )
-                                }
-                              />
-                            </div>
-                          </div>
-
-                          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                            <div className="space-y-2">
-                              <Label htmlFor="wait-for-selector">
-                                Wait For Selector
-                              </Label>
-                              <Input
-                                id="wait-for-selector"
-                                value={waitForSelector}
-                                onChange={(e) =>
-                                  setWaitForSelector(e.target.value)
-                                }
-                                placeholder=".content, #main, etc."
-                              />
-                              <p className="text-xs text-muted-foreground">
-                                Wait for this selector to appear before scraping
-                              </p>
-                            </div>
-
-                            <div className="space-y-2">
-                              <Label htmlFor="wait-timeout">
-                                Wait Timeout (ms)
-                              </Label>
-                              <Input
-                                id="wait-timeout"
-                                type="number"
-                                value={waitTimeout}
-                                onChange={(e) =>
-                                  setWaitTimeout(
-                                    parseInt(e.target.value) || 5000,
-                                  )
-                                }
-                              />
-                            </div>
-                          </div>
-                        </div>
-                      </AccordionContent>
-                    </AccordionItem>
-
-                    <AccordionItem value="advanced-options">
-                      <AccordionTrigger>Advanced Options</AccordionTrigger>
-                      <AccordionContent>
-                        <div className="space-y-4">
-                          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                            <div className="space-y-2">
-                              <Label htmlFor="max-depth">Max Crawl Depth</Label>
-                              <Input
-                                id="max-depth"
-                                type="number"
-                                value={maxDepth}
-                                onChange={(e) =>
-                                  setMaxDepth(parseInt(e.target.value) || 1)
-                                }
-                                min="1"
-                                max="10"
-                              />
-                              <p className="text-xs text-muted-foreground">
-                                Maximum depth for crawling linked pages
-                              </p>
-                            </div>
-
-                            <div className="space-y-2">
-                              <Label htmlFor="throttle-requests">
-                                Throttle Requests
-                              </Label>
-                              <div className="flex items-center space-x-2">
-                                <Switch
-                                  id="throttle-requests"
-                                  checked={throttleRequests}
-                                  onCheckedChange={setThrottleRequests}
-                                />
-                                <Label htmlFor="throttle-requests">
-                                  {throttleRequests ? "Enabled" : "Disabled"}
-                                </Label>
-                              </div>
-                              {throttleRequests && (
-                                <Input
-                                  id="throttle-delay"
-                                  type="number"
-                                  value={throttleDelay}
+                                <Textarea
+                                  id="request-headers"
+                                  value={requestHeaders}
                                   onChange={(e) =>
-                                    setThrottleDelay(
-                                      parseInt(e.target.value) || 1000,
-                                    )
+                                    setRequestHeaders(e.target.value)
                                   }
-                                  placeholder="Delay in milliseconds"
-                                  className="mt-2"
+                                  placeholder='{"User-Agent": "Mozilla/5.0", "Accept": "text/html"}'
+                                  className="font-mono text-sm"
+                                  rows={5}
                                 />
+                              </div>
+
+                              {requestMethod !== "GET" && (
+                                <div className="space-y-2">
+                                  <Label htmlFor="request-body">
+                                    Request Body (JSON)
+                                  </Label>
+                                  <Textarea
+                                    id="request-body"
+                                    value={requestBody}
+                                    onChange={(e) => setRequestBody(e.target.value)}
+                                    placeholder='{"key": "value"}'
+                                    className="font-mono text-sm"
+                                    rows={5}
+                                  />
+                                </div>
                               )}
                             </div>
-                          </div>
+                          </AccordionContent>
+                        </AccordionItem>
 
-                          <div className="space-y-2">
-                            <Label htmlFor="proxy-enabled">Use Proxy</Label>
-                            <div className="flex items-center space-x-2">
-                              <Switch
-                                id="proxy-enabled"
-                                checked={proxyEnabled}
-                                onCheckedChange={setProxyEnabled}
-                              />
-                              <Label htmlFor="proxy-enabled">
-                                {proxyEnabled ? "Enabled" : "Disabled"}
-                              </Label>
-                            </div>
-                            {proxyEnabled && (
-                              <Input
-                                id="proxy-url"
-                                value={proxyUrl}
-                                onChange={(e) => setProxyUrl(e.target.value)}
-                                placeholder="http://username:password@proxy.example.com:8080"
-                                className="mt-2"
-                              />
-                            )}
-                          </div>
-
-                          <div className="space-y-2">
-                            <Label htmlFor="cookies-enabled">
-                              Custom Cookies
-                            </Label>
-                            <div className="flex items-center space-x-2">
-                              <Switch
-                                id="cookies-enabled"
-                                checked={cookiesEnabled}
-                                onCheckedChange={setCookiesEnabled}
-                              />
-                              <Label htmlFor="cookies-enabled">
-                                {cookiesEnabled ? "Enabled" : "Disabled"}
-                              </Label>
-                            </div>
-                            {cookiesEnabled && (
-                              <Textarea
-                                id="cookies"
-                                value={cookies}
-                                onChange={(e) => setCookies(e.target.value)}
-                                placeholder="name=value; domain=example.com; path=/"
-                                className="mt-2"
-                                rows={3}
-                              />
-                            )}
-                          </div>
-                        </div>
-                      </AccordionContent>
-                    </AccordionItem>
-                  </Accordion>
-                </CardContent>
-              </Card>
-
-              <div className="pt-4">
-                <Button
-                  onClick={startScraping}
-                  disabled={
-                    isLoading ||
-                    urls.filter((u) => u).length === 0 ||
-                    selectors.length === 0
-                  }
-                  className="flex items-center gap-2"
-                >
-                  {isLoading ? (
-                    <Loader2 size={16} className="animate-spin" />
-                  ) : (
-                    <Play size={16} />
-                  )}
-                  {isLoading ? "Scraping..." : "Start Scraping"}
-                </Button>
-              </div>
-            </TabsContent>
-
-            {/* Selectors Tab */}
-            <TabsContent value="selectors" className="space-y-4">
-              <div className="flex justify-between items-center">
-                <h3 className="text-lg font-medium">Configured Selectors</h3>
-                <Button
-                  onClick={createNewSelector}
-                  variant="outline"
-                  className="flex items-center gap-2"
-                >
-                  <Plus size={16} />
-                  Add Selector
-                </Button>
-              </div>
-
-              {selectors.length === 0 ? (
-                <div className="flex flex-col items-center justify-center p-12 bg-gray-50 border border-gray-200 rounded-md">
-                  <AlertCircle size={32} className="text-gray-400 mb-2" />
-                  <p className="text-gray-500">
-                    No selectors configured. Click "Add Selector" to create one.
-                  </p>
-                </div>
-              ) : (
-                <div className="space-y-2">
-                  {selectors.map((selector) => (
-                    <Card key={selector.id} className="overflow-hidden">
-                      <div className="p-4">
-                        <div className="flex justify-between items-start">
-                          <div>
-                            <h4 className="font-medium">{selector.name}</h4>
-                            <div className="flex items-center gap-2 mt-1">
-                              <Badge variant="outline">{selector.type}</Badge>
-                              <div className="flex items-center gap-1 text-sm text-muted-foreground">
-                                <code className="bg-gray-100 px-1 py-0.5 rounded text-xs">
-                                  {selector.selector}
-                                </code>
-                                <TooltipProvider>
-                                  <Tooltip>
-                                    <TooltipTrigger asChild>
-                                      <Button
-                                        variant="ghost"
-                                        size="icon"
-                                        className="h-6 w-6"
-                                        onClick={() =>
-                                          copySelector(selector.selector)
-                                        }
-                                      >
-                                        {copiedSelector ===
-                                        selector.selector ? (
-                                          <Check
-                                            size={12}
-                                            className="text-green-500"
-                                          />
-                                        ) : (
-                                          <Copy size={12} />
-                                        )}
-                                      </Button>
-                                    </TooltipTrigger>
-                                    <TooltipContent>
-                                      <p>Copy selector</p>
-                                    </TooltipContent>
-                                  </Tooltip>
-                                </TooltipProvider>
-                              </div>
-                            </div>
-                            {selector.attribute && (
-                              <p className="text-xs text-muted-foreground mt-1">
-                                Attribute: {selector.attribute}
-                              </p>
-                            )}
-                            {selector.listItemSelector && (
-                              <p className="text-xs text-muted-foreground mt-1">
-                                List item: {selector.listItemSelector}
-                              </p>
-                            )}
-                          </div>
-                          <div className="flex gap-1">
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              onClick={() => editSelector(selector)}
-                            >
-                              <Eye size={16} />
-                            </Button>
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              className="text-red-500 hover:text-red-700"
-                              onClick={() => removeSelector(selector.id)}
-                            >
-                              <Trash size={16} />
-                            </Button>
-                          </div>
-                        </div>
-                      </div>
-                    </Card>
-                  ))}
-                </div>
-              )}
-
-              {/* Selector Edit Dialog */}
-              {selectedSelector && (
-                <Dialog
-                  open={!!selectedSelector}
-                  onOpenChange={(open) => !open && setSelectedSelector(null)}
-                >
-                  <DialogContent className="sm:max-w-[500px]">
-                    <DialogHeader>
-                      <DialogTitle>
-                        {isEditingSelector ? "Edit Selector" : "Add Selector"}
-                      </DialogTitle>
-                      <DialogDescription>
-                        Configure the selector to extract specific data from the
-                        webpage.
-                      </DialogDescription>
-                    </DialogHeader>
-                    <div className="space-y-4 py-4">
-                      <div className="space-y-2">
-                        <Label htmlFor="selector-name">Name</Label>
-                        <Input
-                          id="selector-name"
-                          value={selectedSelector.name}
-                          onChange={(e) =>
-                            setSelectedSelector({
-                              ...selectedSelector,
-                              name: e.target.value,
-                            })
-                          }
-                          placeholder="Product Title, Price, etc."
-                        />
-                      </div>
-
-                      <div className="space-y-2">
-                        <Label htmlFor="selector-css">CSS Selector</Label>
-                        <Input
-                          id="selector-css"
-                          value={selectedSelector.selector}
-                          onChange={(e) =>
-                            setSelectedSelector({
-                              ...selectedSelector,
-                              selector: e.target.value,
-                            })
-                          }
-                          placeholder=".product-title, #price, etc."
-                        />
-                      </div>
-
-                      <div className="space-y-2">
-                        <Label htmlFor="selector-type">Type</Label>
-                        <Select
-                          value={selectedSelector.type}
-                          onValueChange={(value) =>
-                            setSelectedSelector({
-                              ...selectedSelector,
-                              type: value as
-                                | "text"
-                                | "html"
-                                | "attribute"
-                                | "list",
-                            })
-                          }
-                        >
-                          <SelectTrigger id="selector-type">
-                            <SelectValue placeholder="Select type" />
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value="text">Text</SelectItem>
-                            <SelectItem value="html">HTML</SelectItem>
-                            <SelectItem value="attribute">Attribute</SelectItem>
-                            <SelectItem value="list">List</SelectItem>
-                          </SelectContent>
-                        </Select>
-                      </div>
-
-                      {selectedSelector.type === "attribute" && (
-                        <div className="space-y-2">
-                          <Label htmlFor="selector-attribute">
-                            Attribute Name
-                          </Label>
-                          <Input
-                            id="selector-attribute"
-                            value={selectedSelector.attribute || ""}
-                            onChange={(e) =>
-                              setSelectedSelector({
-                                ...selectedSelector,
-                                attribute: e.target.value,
-                              })
-                            }
-                            placeholder="href, src, data-id, etc."
-                          />
-                        </div>
-                      )}
-
-                      {selectedSelector.type === "list" && (
-                        <div className="space-y-2">
-                          <Label htmlFor="selector-list-item">
-                            List Item Selector
-                          </Label>
-                          <Input
-                            id="selector-list-item"
-                            value={selectedSelector.listItemSelector || ""}
-                            onChange={(e) =>
-                              setSelectedSelector({
-                                ...selectedSelector,
-                                listItemSelector: e.target.value,
-                              })
-                            }
-                            placeholder="li, .item, etc."
-                          />
-                        </div>
-                      )}
-                    </div>
-                    <DialogFooter>
-                      <Button variant="outline" onClick={cancelSelectorEdit}>
-                        Cancel
-                      </Button>
-                      <Button onClick={saveSelector}>
-                        {isEditingSelector ? "Update" : "Add"}
-                      </Button>
-                    </DialogFooter>
-                  </DialogContent>
-                </Dialog>
-              )}
-            </TabsContent>
-
-            {/* Preview Tab */}
-            <TabsContent value="preview">
-              {activeUrl ? (
-                <div className="space-y-4">
-                  <div className="flex justify-between items-center">
-                    <h3 className="text-lg font-medium">
-                      Preview: {activeUrl}
-                    </h3>
-                    <div className="flex items-center gap-2">
-                      <Button
-                        variant={
-                          previewMode === "visual" ? "default" : "outline"
-                        }
-                        size="sm"
-                        onClick={() => setPreviewMode("visual")}
-                      >
-                        <Eye size={16} className="mr-2" />
-                        Visual
-                      </Button>
-                      <Button
-                        variant={previewMode === "code" ? "default" : "outline"}
-                        size="sm"
-                        onClick={() => setPreviewMode("code")}
-                      >
-                        <Code size={16} className="mr-2" />
-                        Code
-                      </Button>
-                    </div>
-                  </div>
-                  <WebPreview
-                    url={activeUrl}
-                    onSelectorCreated={addSelector}
-                    mode={previewMode === "visual" ? "visual" : "code"}
-                  />
-                </div>
-              ) : (
-                <div className="flex flex-col items-center justify-center p-12 bg-gray-50 border border-gray-200 rounded-md">
-                  <AlertCircle size={32} className="text-gray-400 mb-2" />
-                  <p className="text-gray-500">
-                    Please select a URL to preview
-                  </p>
-                  <Button
-                    variant="outline"
-                    className="mt-4"
-                    onClick={() => setActiveTab("urls")}
-                  >
-                    Go to URLs Tab
-                  </Button>
-                </div>
-              )}
-            </TabsContent>
-
-            {/* Results Tab */}
-            <TabsContent value="results">
-              {results.length > 0 ? (
-                <div className="space-y-4">
-                  <div className="flex items-center justify-between">
-                    <h3 className="text-lg font-medium">Scraping Results</h3>
-                    <div className="flex items-center gap-2">
-                      <Select
-                        value={exportFormat}
-                        onValueChange={setExportFormat}
-                      >
-                        <SelectTrigger className="w-[120px]">
-                          <SelectValue placeholder="Format" />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="json">JSON</SelectItem>
-                          <SelectItem value="csv">CSV</SelectItem>
-                          <SelectItem value="xml">XML</SelectItem>
-                          <SelectItem value="excel">Excel</SelectItem>
-                        </SelectContent>
-                      </Select>
-                      <Button
-                        variant="outline"
-                        onClick={saveResultsToFile}
-                        disabled={isLoading}
-                        className="flex items-center gap-2"
-                      >
-                        <Download size={16} />
-                        Save to File
-                      </Button>
-                      <Button
-                        variant="outline"
-                        onClick={saveResultsToDatabase}
-                        disabled={isLoading || !dbConfig}
-                        className="flex items-center gap-2"
-                      >
-                        <Database size={16} />
-                        Save to Database
-                      </Button>
-                    </div>
-                  </div>
-
-                  <div className="space-y-4">
-                    {results.map((result, index) => (
-                      <Card key={index}>
-                        <CardHeader
-                          className={`pb-2 ${result.success ? "" : "bg-red-50"}`}
-                        >
-                          <CardTitle className="text-base flex items-center justify-between">
-                            <span className="truncate">{result.url}</span>
-                            {!result.success && (
-                              <span className="text-red-500 text-sm font-normal">
-                                Failed
-                              </span>
-                            )}
-                          </CardTitle>
-                        </CardHeader>
-                        <CardContent className="pt-4">
-                          {result.success ? (
+                        <AccordionItem value="browser-options">
+                          <AccordionTrigger>Browser Behavior</AccordionTrigger>
+                          <AccordionContent>
                             <div className="space-y-4">
-                              <div className="flex justify-end gap-2">
-                                <Button
-                                  variant="outline"
-                                  size="sm"
-                                  onClick={() => {
-                                    navigator.clipboard.writeText(
-                                      JSON.stringify(result.data, null, 2),
-                                    );
-                                    toast({
-                                      title: "Copied to Clipboard",
-                                      description:
-                                        "Result data has been copied to clipboard.",
-                                    });
-                                  }}
-                                  className="flex items-center gap-1"
-                                >
-                                  <Copy size={14} />
-                                  Copy
-                                </Button>
-                              </div>
-                              <Tabs defaultValue="json">
-                                <TabsList className="grid w-full grid-cols-3">
-                                  <TabsTrigger
-                                    value="json"
-                                    className="flex items-center gap-1"
-                                  >
-                                    <FileJson size={14} />
-                                    JSON
-                                  </TabsTrigger>
-                                  <TabsTrigger
-                                    value="table"
-                                    className="flex items-center gap-1"
-                                  >
-                                    <Table2 size={14} />
-                                    Table
-                                  </TabsTrigger>
-                                  <TabsTrigger
-                                    value="raw"
-                                    className="flex items-center gap-1"
-                                  >
-                                    <Code size={14} />
-                                    Raw
-                                  </TabsTrigger>
-                                </TabsList>
-                                <TabsContent value="json">
-                                  <ScrollArea className="h-[300px] rounded-md border p-4">
-                                    <pre className="text-sm font-mono">
-                                      {JSON.stringify(result.data, null, 2)}
-                                    </pre>
-                                  </ScrollArea>
-                                </TabsContent>
-                                <TabsContent value="table">
-                                  <ScrollArea className="h-[300px] rounded-md border">
-                                    <table className="w-full">
-                                      <thead>
-                                        <tr className="border-b bg-muted/50">
-                                          <th className="p-2 text-left font-medium">
-                                            Field
-                                          </th>
-                                          <th className="p-2 text-left font-medium">
-                                            Value
-                                          </th>
-                                        </tr>
-                                      </thead>
-                                      <tbody>
-                                        {Object.entries(result.data).map(
-                                          ([key, value]) => (
-                                            <tr key={key} className="border-b">
-                                              <td className="p-2 font-mono text-sm">
-                                                {key}
-                                              </td>
-                                              <td className="p-2 text-sm">
-                                                {typeof value === "object" ? (
-                                                  <pre className="text-xs">
-                                                    {JSON.stringify(
-                                                      value,
-                                                      null,
-                                                      2,
-                                                    )}
-                                                  </pre>
-                                                ) : (
-                                                  String(value)
-                                                )}
-                                              </td>
-                                            </tr>
-                                          ),
-                                        )}
-                                      </tbody>
-                                    </table>
-                                  </ScrollArea>
-                                </TabsContent>
-                                <TabsContent value="raw">
-                                  <ScrollArea className="h-[300px] rounded-md border p-4">
-                                    <pre className="text-sm">
-                                      {JSON.stringify(result)}
-                                    </pre>
-                                  </ScrollArea>
-                                </TabsContent>
-                              </Tabs>
-                            </div>
-                          ) : (
-                            <div className="text-red-500 text-sm">
-                              {result.error}
-                            </div>
-                          )}
-                        </CardContent>
-                      </Card>
-                    ))}
-                  </div>
-                </div>
-              ) : (
-                <div className="flex flex-col items-center justify-center p-12 bg-gray-50 border border-gray-200 rounded-md">
-                  <AlertCircle size={32} className="text-gray-400 mb-2" />
-                  <p className="text-gray-500">No scraping results yet</p>
-                  <Button
-                    variant="outline"
-                    className="mt-4"
-                    onClick={startScraping}
-                    disabled={
-                      isLoading ||
-                      urls.filter((u) => u).length === 0 ||
-                      selectors.length === 0
-                    }
-                  >
-                    Start Scraping
-                  </Button>
-                </div>
-              )}
-            </TabsContent>
+                              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <div className="space-y-2">
+                                  <Label htmlFor="enable-javascript">
+                                    JavaScript
+                                  </Label>
+                                  <div className="flex items-center space-x-2">
+                                    <Switch
+                                      id="enable-javascript"
+                                      checked={enableJavaScript}
+                                      onCheckedChange={setEnableJavaScript}
+                                    />
+                                    <Label htmlFor="enable-javascript">
+                                      {enableJavaScript ? "Enabled" : "Disabled"}
+                                    </Label>
+                                  </div>
+                                </div>
 
-            {/* Storage Options Tab */}
-            <TabsContent value="storage" className="space-y-6">
-              <Card>
-                <CardHeader>
-                  <CardTitle className="flex items-center gap-2">
-                    <Save size={18} />
-                    File Storage
-                  </CardTitle>
-                  <CardDescription>
-                    Configure where to save the scraped data as files
-                  </CardDescription>
-                </CardHeader>
-                <CardContent>
-                  <div className="space-y-4">
-                    <div className="space-y-2">
-                      <Label htmlFor="output-folder">Output Folder</Label>
-                      <Input
-                        id="output-folder"
-                        value={outputFolder}
-                        onChange={(e) => setOutputFolder(e.target.value)}
-                        placeholder="data/scraping"
-                      />
-                      <p className="text-xs text-muted-foreground">
-                        Relative to the project root directory
+                                <div className="space-y-2">
+                                  <Label htmlFor="capture-screenshot">
+                                    Capture Screenshot
+                                  </Label>
+                                  <div className="flex items-center space-x-2">
+                                    <Switch
+                                      id="capture-screenshot"
+                                      checked={captureScreenshot}
+                                      onCheckedChange={setCaptureScreenshot}
+                                    />
+                                    <Label htmlFor="capture-screenshot">
+                                      {captureScreenshot ? "Enabled" : "Disabled"}
+                                    </Label>
+                                  </div>
+                                </div>
+                              </div>
+
+                              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                                <div className="space-y-2">
+                                  <Label htmlFor="preview-device">
+                                    Device Emulation
+                                  </Label>
+                                  <Select
+                                    value={previewDevice}
+                                    onValueChange={setPreviewDevice}
+                                  >
+                                    <SelectTrigger id="preview-device">
+                                      <SelectValue placeholder="Select device" />
+                                    </SelectTrigger>
+                                    <SelectContent>
+                                      <SelectItem value="desktop">
+                                        Desktop
+                                      </SelectItem>
+                                      <SelectItem value="mobile">Mobile</SelectItem>
+                                      <SelectItem value="tablet">Tablet</SelectItem>
+                                    </SelectContent>
+                                  </Select>
+                                </div>
+
+                                <div className="space-y-2">
+                                  <Label htmlFor="preview-width">
+                                    Viewport Width
+                                  </Label>
+                                  <Input
+                                    id="preview-width"
+                                    type="number"
+                                    value={previewWidth}
+                                    onChange={(e) =>
+                                      setPreviewWidth(
+                                        parseInt(e.target.value) || 1024,
+                                      )
+                                    }
+                                  />
+                                </div>
+
+                                <div className="space-y-2">
+                                  <Label htmlFor="preview-height">
+                                    Viewport Height
+                                  </Label>
+                                  <Input
+                                    id="preview-height"
+                                    type="number"
+                                    value={previewHeight}
+                                    onChange={(e) =>
+                                      setPreviewHeight(
+                                        parseInt(e.target.value) || 600,
+                                      )
+                                    }
+                                  />
+                                </div>
+                              </div>
+
+                              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <div className="space-y-2">
+                                  <Label htmlFor="wait-for-selector">
+                                    Wait For Selector
+                                  </Label>
+                                  <Input
+                                    id="wait-for-selector"
+                                    value={waitForSelector}
+                                    onChange={(e) =>
+                                      setWaitForSelector(e.target.value)
+                                    }
+                                    placeholder=".content, #main, etc."
+                                  />
+                                  <p className="text-xs text-muted-foreground">
+                                    Wait for this selector to appear before scraping
+                                  </p>
+                                </div>
+
+                                <div className="space-y-2">
+                                  <Label htmlFor="wait-timeout">
+                                    Wait Timeout (ms)
+                                  </Label>
+                                  <Input
+                                    id="wait-timeout"
+                                    type="number"
+                                    value={waitTimeout}
+                                    onChange={(e) =>
+                                      setWaitTimeout(
+                                        parseInt(e.target.value) || 5000,
+                                      )
+                                    }
+                                  />
+                                </div>
+                              </div>
+                            </div>
+                          </AccordionContent>
+                        </AccordionItem>
+
+                        <AccordionItem value="advanced-options">
+                          <AccordionTrigger>Advanced Options</AccordionTrigger>
+                          <AccordionContent>
+                            <div className="space-y-4">
+                              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <div className="space-y-2">
+                                  <Label htmlFor="max-depth">Max Crawl Depth</Label>
+                                  <Input
+                                    id="max-depth"
+                                    type="number"
+                                    value={maxDepth}
+                                    onChange={(e) =>
+                                      setMaxDepth(parseInt(e.target.value) || 1)
+                                    }
+                                    min="1"
+                                    max="10"
+                                  />
+                                  <p className="text-xs text-muted-foreground">
+                                    Maximum depth for crawling linked pages
+                                  </p>
+                                </div>
+
+                                <div className="space-y-2">
+                                  <Label htmlFor="throttle-requests">
+                                    Throttle Requests
+                                  </Label>
+                                  <div className="flex items-center space-x-2">
+                                    <Switch
+                                      id="throttle-requests"
+                                      checked={throttleRequests}
+                                      onCheckedChange={setThrottleRequests}
+                                    />
+                                    <Label htmlFor="throttle-requests">
+                                      {throttleRequests ? "Enabled" : "Disabled"}
+                                    </Label>
+                                  </div>
+                                  {throttleRequests && (
+                                    <Input
+                                      id="throttle-delay"
+                                      type="number"
+                                      value={throttleDelay}
+                                      onChange={(e) =>
+                                        setThrottleDelay(
+                                          parseInt(e.target.value) || 1000,
+                                        )
+                                      }
+                                      placeholder="Delay in milliseconds"
+                                      className="mt-2"
+                                    />
+                                  )}
+                                </div>
+                              </div>
+
+                              <div className="space-y-2">
+                                <Label htmlFor="proxy-enabled">Use Proxy</Label>
+                                <div className="flex items-center space-x-2">
+                                  <Switch
+                                    id="proxy-enabled"
+                                    checked={proxyEnabled}
+                                    onCheckedChange={setProxyEnabled}
+                                  />
+                                  <Label htmlFor="proxy-enabled">
+                                    {proxyEnabled ? "Enabled" : "Disabled"}
+                                  </Label>
+                                </div>
+                                {proxyEnabled && (
+                                  <Input
+                                    id="proxy-url"
+                                    value={proxyUrl}
+                                    onChange={(e) => setProxyUrl(e.target.value)}
+                                    placeholder="http://username:password@proxy.example.com:8080"
+                                    className="mt-2"
+                                  />
+                                )}
+                              </div>
+
+                              <div className="space-y-2">
+                                <Label htmlFor="cookies-enabled">
+                                  Custom Cookies
+                                </Label>
+                                <div className="flex items-center space-x-2">
+                                  <Switch
+                                    id="cookies-enabled"
+                                    checked={cookiesEnabled}
+                                    onCheckedChange={setCookiesEnabled}
+                                  />
+                                  <Label htmlFor="cookies-enabled">
+                                    {cookiesEnabled ? "Enabled" : "Disabled"}
+                                  </Label>
+                                </div>
+                                {cookiesEnabled && (
+                                  <Textarea
+                                    id="cookies"
+                                    value={cookies}
+                                    onChange={(e) => setCookies(e.target.value)}
+                                    placeholder="name=value; domain=example.com; path=/"
+                                    className="mt-2"
+                                    rows={3}
+                                  />
+                                )}
+                              </div>
+                            </div>
+                          </AccordionContent>
+                        </AccordionItem>
+                      </Accordion>
+                    </CardContent>
+                  </Card>
+
+                  <div className="pt-4">
+                    <Button
+                      onClick={startScraping}
+                      disabled={
+                        isLoading ||
+                        urls.filter((u) => u).length === 0 ||
+                        selectors.length === 0
+                      }
+                      className="flex items-center gap-2"
+                    >
+                      {isLoading ? (
+                        <Loader2 size={16} className="animate-spin" />
+                      ) : (
+                        <Play size={16} />
+                      )}
+                      {isLoading ? "Scraping..." : "Start Scraping"}
+                    </Button>
+                  </div>
+                </TabsContent>
+
+                {/* Selectors Tab */}
+                <TabsContent value="selectors" className="space-y-4">
+                  <div className="flex justify-between items-center">
+                    <h3 className="text-lg font-medium">Configured Selectors</h3>
+                    <Button
+                      onClick={createNewSelector}
+                      variant="outline"
+                      className="flex items-center gap-2"
+                    >
+                      <Plus size={16} />
+                      Add Selector
+                    </Button>
+                  </div>
+
+                  {selectors.length === 0 ? (
+                    <div className="flex flex-col items-center justify-center p-12 bg-gray-50 border border-gray-200 rounded-md">
+                      <AlertCircle size={32} className="text-gray-400 mb-2" />
+                      <p className="text-gray-500">
+                        No selectors configured. Click "Add Selector" to create one.
                       </p>
                     </div>
-
+                  ) : (
                     <div className="space-y-2">
-                      <Label htmlFor="export-format">
-                        Default Export Format
-                      </Label>
-                      <Select
-                        value={exportFormat}
-                        onValueChange={setExportFormat}
-                      >
-                        <SelectTrigger id="export-format">
-                          <SelectValue placeholder="Select format" />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="json">JSON</SelectItem>
-                          <SelectItem value="csv">CSV</SelectItem>
-                          <SelectItem value="xml">XML</SelectItem>
-                          <SelectItem value="excel">Excel</SelectItem>
-                        </SelectContent>
-                      </Select>
-                    </div>
-                  </div>
-                </CardContent>
-              </Card>
-
-              <DatabaseConfigPanel
-                selectors={selectors}
-                onSaveConfig={handleDbConfigSave}
-              />
-            </TabsContent>
-          </Tabs>
-        </CardContent>
-      </Card>
-    </div>
-  );
-};
-
-export default ScrapingModule;
+                      {selectors.map((selector) => (
+                        <Card key={selector.id} className="overflow-hidden">
+                          <div className="p-4">
+                            <div className="flex justify-between items-start">
+                              <div>
+                                <h4 className="font-medium">{selector.name}</h4>
+                                <div className="flex items-center gap-2 mt-1">
+                                  <Badge variant="outline">{selector.type}</Badge>
+                                  <div className="flex items-center gap-1 text-sm text-muted-foreground">
+                                    <code className="bg-gray-100 px-1 py-0.5 rounded text-xs">
+                                      {selector.selector}
+                                    </code>
+                                    <TooltipProvider>
+                                      <Tooltip>
+                                        <TooltipTrigger asChild>
+                                          <Button
+                                            variant="ghost"
+                                            size="icon"
+                                            className="h-6 w-6"
+                                            onClick={() =>
+                                              copySelector(selector.selector)
+                                            }
+                                          >
+                                            {copiedSelector ===
+                                            selector.selector ? (
+                                              <Check
