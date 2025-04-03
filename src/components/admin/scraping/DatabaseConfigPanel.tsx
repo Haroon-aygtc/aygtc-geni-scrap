@@ -306,4 +306,5 @@ const DatabaseConfigPanel: React.FC<DatabaseConfigPanelProps> = ({
   );
 };
 
+export { DatabaseConfigPanel };
 export default DatabaseConfigPanel;

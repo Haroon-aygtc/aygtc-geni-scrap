@@ -5,7 +5,7 @@
 import express from "express";
 import cors from "cors";
 import bodyParser from "body-parser";
-import { createClient } from "@supabase/supabase-js";
+import { getMySQLClient } from "./utils/dbHelpers.js";
 import dotenv from "dotenv";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -25,30 +25,46 @@ const PORT = process.env.API_PORT || 3001;
 app.use(cors());
 app.use(bodyParser.json());
 
-// Initialize Supabase client
-const supabaseUrl = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
-const supabaseKey = process.env.SUPABASE_SERVICE_KEY;
+// Initialize MySQL connection
+let mysqlClient = null;
 
-// Check if Supabase credentials are available
-if (!supabaseUrl || !supabaseKey) {
-  console.warn(
-    "Supabase credentials missing. Some API endpoints may not work properly.",
-  );
-  console.warn(
-    "Please ensure SUPABASE_URL/VITE_SUPABASE_URL and SUPABASE_SERVICE_KEY are set in your .env file.",
-  );
-}
+// Initialize MySQL connection
+const initializeMySQL = async () => {
+  try {
+    mysqlClient = await getMySQLClient();
+    console.log("MySQL connection initialized successfully");
+    return true;
+  } catch (error) {
+    console.error("Failed to initialize MySQL connection:", error);
+    return false;
+  }
+};
 
-// Initialize Supabase client only if credentials are available
-const supabase =
-  supabaseUrl && supabaseKey ? createClient(supabaseUrl, supabaseKey) : null;
+// Call the initialization function
+initializeMySQL().catch((err) => {
+  console.error("Error during MySQL initialization:", err);
+});
 
 // Health check endpoint
-app.get("/api/health", (req, res) => {
+app.get("/api/health", async (req, res) => {
+  let mysqlConnected = false;
+
+  try {
+    if (!mysqlClient) {
+      mysqlClient = await getMySQLClient();
+    }
+    // Test the connection with a simple query
+    await mysqlClient.query("SELECT 1");
+    mysqlConnected = true;
+  } catch (error) {
+    console.error("MySQL connection check failed:", error);
+    mysqlConnected = false;
+  }
+
   res.status(200).json({
     status: "ok",
     timestamp: new Date().toISOString(),
-    supabaseConnected: !!supabase,
+    mysqlConnected,
   });
 });
 
@@ -57,10 +73,8 @@ app.get("/api/health", (req, res) => {
 // Auth API
 app.post("/api/auth/register", async (req, res) => {
   try {
-    if (!supabase) {
-      return res
-        .status(503)
-        .json({ error: "Database connection not available" });
+    if (!mysqlClient) {
+      mysqlClient = await getMySQLClient();
     }
 
     const { email, password, name } = req.body;
@@ -69,20 +83,38 @@ app.post("/api/auth/register", async (req, res) => {
       return res.status(400).json({ error: "Email and password are required" });
     }
 
-    const { data, error } = await supabase.auth.signUp({
-      email,
-      password,
-      options: {
-        data: {
-          name: name || email.split("@")[0],
-          role: "user",
-        },
-      },
-    });
+    // Check if user already exists
+    const [existingUsers] = await mysqlClient.query(
+      "SELECT * FROM users WHERE email = ?",
+      [email],
+    );
 
-    if (error) throw error;
+    if (existingUsers.length > 0) {
+      return res
+        .status(409)
+        .json({ error: "User with this email already exists" });
+    }
 
-    res.status(201).json({ success: true, user: data.user });
+    // Hash the password
+    const bcrypt = require("bcryptjs");
+    const salt = await bcrypt.genSalt(10);
+    const hashedPassword = await bcrypt.hash(password, salt);
+
+    // Insert the new user
+    const [result] = await mysqlClient.query(
+      "INSERT INTO users (email, password, name, role, created_at) VALUES (?, ?, ?, ?, ?)",
+      [email, hashedPassword, name || email.split("@")[0], "user", new Date()],
+    );
+
+    // Get the inserted user
+    const [users] = await mysqlClient.query(
+      "SELECT id, email, name, role, created_at FROM users WHERE id = ?",
+      [result.insertId],
+    );
+
+    const user = users[0];
+
+    res.status(201).json({ success: true, user });
   } catch (error) {
     console.error("Error registering user:", error);
     res.status(500).json({ error: error.message });
@@ -91,10 +123,8 @@ app.post("/api/auth/register", async (req, res) => {
 
 app.post("/api/auth/login", async (req, res) => {
   try {
-    if (!supabase) {
-      return res
-        .status(503)
-        .json({ error: "Database connection not available" });
+    if (!mysqlClient) {
+      mysqlClient = await getMySQLClient();
     }
 
     const { email, password } = req.body;
@@ -103,17 +133,41 @@ app.post("/api/auth/login", async (req, res) => {
       return res.status(400).json({ error: "Email and password are required" });
     }
 
-    const { data, error } = await supabase.auth.signInWithPassword({
-      email,
-      password,
-    });
+    // Get user from database
+    const [users] = await mysqlClient.query(
+      "SELECT * FROM users WHERE email = ?",
+      [email],
+    );
 
-    if (error) throw error;
+    if (users.length === 0) {
+      return res.status(401).json({ error: "Invalid email or password" });
+    }
+
+    const user = users[0];
+
+    // Verify password
+    const bcrypt = require("bcryptjs");
+    const isMatch = await bcrypt.compare(password, user.password);
+
+    if (!isMatch) {
+      return res.status(401).json({ error: "Invalid email or password" });
+    }
+
+    // Generate JWT token
+    const jwt = require("jsonwebtoken");
+    const token = jwt.sign(
+      { id: user.id, email: user.email, role: user.role },
+      process.env.JWT_SECRET || "your-secret-key",
+      { expiresIn: "24h" },
+    );
+
+    // Don't send password back to client
+    delete user.password;
 
     res.status(200).json({
       success: true,
-      user: data.user,
-      session: data.session,
+      user,
+      session: { token },
     });
   } catch (error) {
     console.error("Error logging in user:", error);
@@ -124,20 +178,15 @@ app.post("/api/auth/login", async (req, res) => {
 // Context Rules API
 app.get("/api/context-rules", async (req, res) => {
   try {
-    if (!supabase) {
-      return res
-        .status(503)
-        .json({ error: "Database connection not available" });
+    if (!mysqlClient) {
+      mysqlClient = await getMySQLClient();
     }
 
-    const { data, error } = await supabase
-      .from("context_rules")
-      .select("*")
-      .order("priority", { ascending: false });
+    const [rules] = await mysqlClient.query(
+      "SELECT * FROM context_rules ORDER BY priority DESC",
+    );
 
-    if (error) throw error;
-
-    res.status(200).json(data);
+    res.status(200).json(rules);
   } catch (error) {
     console.error("Error fetching context rules:", error);
     res.status(500).json({ error: error.message });
@@ -146,23 +195,21 @@ app.get("/api/context-rules", async (req, res) => {
 
 app.get("/api/context-rules/:id", async (req, res) => {
   try {
-    if (!supabase) {
-      return res
-        .status(503)
-        .json({ error: "Database connection not available" });
+    if (!mysqlClient) {
+      mysqlClient = await getMySQLClient();
     }
 
     const { id } = req.params;
-    const { data, error } = await supabase
-      .from("context_rules")
-      .select("*")
-      .eq("id", id)
-      .single();
+    const [rules] = await mysqlClient.query(
+      "SELECT * FROM context_rules WHERE id = ?",
+      [id],
+    );
 
-    if (error) throw error;
-    if (!data) return res.status(404).json({ error: "Context rule not found" });
+    if (rules.length === 0) {
+      return res.status(404).json({ error: "Context rule not found" });
+    }
 
-    res.status(200).json(data);
+    res.status(200).json(rules[0]);
   } catch (error) {
     console.error(`Error fetching context rule ${req.params.id}:`, error);
     res.status(500).json({ error: error.message });
@@ -171,10 +218,8 @@ app.get("/api/context-rules/:id", async (req, res) => {
 
 app.post("/api/context-rules", async (req, res) => {
   try {
-    if (!supabase) {
-      return res
-        .status(503)
-        .json({ error: "Database connection not available" });
+    if (!mysqlClient) {
+      mysqlClient = await getMySQLClient();
     }
 
     const { name, description, content, isActive, priority } = req.body;
@@ -183,23 +228,20 @@ app.post("/api/context-rules", async (req, res) => {
       return res.status(400).json({ error: "Name and content are required" });
     }
 
-    const { data, error } = await supabase
-      .from("context_rules")
-      .insert([
-        {
-          name,
-          description,
-          content,
-          is_active: isActive !== undefined ? isActive : true,
-          priority: priority || 0,
-        },
-      ])
-      .select()
-      .single();
+    const is_active = isActive !== undefined ? isActive : true;
+    const priorityValue = priority || 0;
 
-    if (error) throw error;
+    const [result] = await mysqlClient.query(
+      "INSERT INTO context_rules (name, description, content, is_active, priority, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+      [name, description, content, is_active, priorityValue, new Date()],
+    );
 
-    res.status(201).json(data);
+    const [insertedRule] = await mysqlClient.query(
+      "SELECT * FROM context_rules WHERE id = ?",
+      [result.insertId],
+    );
+
+    res.status(201).json(insertedRule[0]);
   } catch (error) {
     console.error("Error creating context rule:", error);
     res.status(500).json({ error: error.message });
@@ -208,33 +250,71 @@ app.post("/api/context-rules", async (req, res) => {
 
 app.put("/api/context-rules/:id", async (req, res) => {
   try {
-    if (!supabase) {
-      return res
-        .status(503)
-        .json({ error: "Database connection not available" });
+    if (!mysqlClient) {
+      mysqlClient = await getMySQLClient();
     }
 
     const { id } = req.params;
     const { name, description, content, isActive, priority } = req.body;
 
-    const updates = {};
-    if (name !== undefined) updates.name = name;
-    if (description !== undefined) updates.description = description;
-    if (content !== undefined) updates.content = content;
-    if (isActive !== undefined) updates.is_active = isActive;
-    if (priority !== undefined) updates.priority = priority;
+    // Check if rule exists
+    const [existingRules] = await mysqlClient.query(
+      "SELECT * FROM context_rules WHERE id = ?",
+      [id],
+    );
 
-    const { data, error } = await supabase
-      .from("context_rules")
-      .update(updates)
-      .eq("id", id)
-      .select()
-      .single();
+    if (existingRules.length === 0) {
+      return res.status(404).json({ error: "Context rule not found" });
+    }
 
-    if (error) throw error;
-    if (!data) return res.status(404).json({ error: "Context rule not found" });
+    // Build update query dynamically
+    const updates = [];
+    const values = [];
 
-    res.status(200).json(data);
+    if (name !== undefined) {
+      updates.push("name = ?");
+      values.push(name);
+    }
+
+    if (description !== undefined) {
+      updates.push("description = ?");
+      values.push(description);
+    }
+
+    if (content !== undefined) {
+      updates.push("content = ?");
+      values.push(content);
+    }
+
+    if (isActive !== undefined) {
+      updates.push("is_active = ?");
+      values.push(isActive);
+    }
+
+    if (priority !== undefined) {
+      updates.push("priority = ?");
+      values.push(priority);
+    }
+
+    updates.push("updated_at = ?");
+    values.push(new Date());
+
+    // Add id as the last parameter
+    values.push(id);
+
+    // Execute update
+    await mysqlClient.query(
+      `UPDATE context_rules SET ${updates.join(", ")} WHERE id = ?`,
+      values,
+    );
+
+    // Get updated rule
+    const [updatedRules] = await mysqlClient.query(
+      "SELECT * FROM context_rules WHERE id = ?",
+      [id],
+    );
+
+    res.status(200).json(updatedRules[0]);
   } catch (error) {
     console.error(`Error updating context rule ${req.params.id}:`, error);
     res.status(500).json({ error: error.message });
@@ -243,19 +323,24 @@ app.put("/api/context-rules/:id", async (req, res) => {
 
 app.delete("/api/context-rules/:id", async (req, res) => {
   try {
-    if (!supabase) {
-      return res
-        .status(503)
-        .json({ error: "Database connection not available" });
+    if (!mysqlClient) {
+      mysqlClient = await getMySQLClient();
     }
 
     const { id } = req.params;
-    const { error } = await supabase
-      .from("context_rules")
-      .delete()
-      .eq("id", id);
 
-    if (error) throw error;
+    // Check if rule exists
+    const [existingRules] = await mysqlClient.query(
+      "SELECT * FROM context_rules WHERE id = ?",
+      [id],
+    );
+
+    if (existingRules.length === 0) {
+      return res.status(404).json({ error: "Context rule not found" });
+    }
+
+    // Delete the rule
+    await mysqlClient.query("DELETE FROM context_rules WHERE id = ?", [id]);
 
     res.status(204).send();
   } catch (error) {
@@ -267,17 +352,13 @@ app.delete("/api/context-rules/:id", async (req, res) => {
 // Widget Configuration API
 app.get("/api/widget-configs", async (req, res) => {
   try {
-    if (!supabase) {
-      return res
-        .status(503)
-        .json({ error: "Database connection not available" });
+    if (!mysqlClient) {
+      mysqlClient = await getMySQLClient();
     }
 
-    const { data, error } = await supabase.from("widget_configs").select("*");
+    const [configs] = await mysqlClient.query("SELECT * FROM widget_configs");
 
-    if (error) throw error;
-
-    res.status(200).json(data);
+    res.status(200).json(configs);
   } catch (error) {
     console.error("Error fetching widget configs:", error);
     res.status(500).json({ error: error.message });
@@ -286,24 +367,21 @@ app.get("/api/widget-configs", async (req, res) => {
 
 app.get("/api/widget-configs/:id", async (req, res) => {
   try {
-    if (!supabase) {
-      return res
-        .status(503)
-        .json({ error: "Database connection not available" });
+    if (!mysqlClient) {
+      mysqlClient = await getMySQLClient();
     }
 
     const { id } = req.params;
-    const { data, error } = await supabase
-      .from("widget_configs")
-      .select("*")
-      .eq("id", id)
-      .single();
+    const [configs] = await mysqlClient.query(
+      "SELECT * FROM widget_configs WHERE id = ?",
+      [id],
+    );
 
-    if (error) throw error;
-    if (!data)
+    if (configs.length === 0) {
       return res.status(404).json({ error: "Widget config not found" });
+    }
 
-    res.status(200).json(data);
+    res.status(200).json(configs[0]);
   } catch (error) {
     console.error(`Error fetching widget config ${req.params.id}:`, error);
     res.status(500).json({ error: error.message });
@@ -312,10 +390,8 @@ app.get("/api/widget-configs/:id", async (req, res) => {
 
 app.post("/api/widget-configs", async (req, res) => {
   try {
-    if (!supabase) {
-      return res
-        .status(503)
-        .json({ error: "Database connection not available" });
+    if (!mysqlClient) {
+      mysqlClient = await getMySQLClient();
     }
 
     const {
@@ -336,30 +412,43 @@ app.post("/api/widget-configs", async (req, res) => {
       return res.status(400).json({ error: "Name is required" });
     }
 
-    const { data, error } = await supabase
-      .from("widget_configs")
-      .insert([
-        {
-          name,
-          primary_color: primary_color || "#3b82f6",
-          position: position || "bottom-right",
-          initial_state: initial_state || "minimized",
-          allow_attachments:
-            allow_attachments !== undefined ? allow_attachments : true,
-          allow_voice: allow_voice !== undefined ? allow_voice : true,
-          allow_emoji: allow_emoji !== undefined ? allow_emoji : true,
-          context_mode: context_mode || "general",
-          context_rule_id,
-          welcome_message: welcome_message || "How can I help you today?",
-          placeholder_text: placeholder_text || "Type your message here...",
-        },
-      ])
-      .select()
-      .single();
+    const [result] = await mysqlClient.query(
+      `INSERT INTO widget_configs (
+        name, 
+        primary_color, 
+        position, 
+        initial_state, 
+        allow_attachments, 
+        allow_voice, 
+        allow_emoji, 
+        context_mode, 
+        context_rule_id, 
+        welcome_message, 
+        placeholder_text,
+        created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        name,
+        primary_color || "#3b82f6",
+        position || "bottom-right",
+        initial_state || "minimized",
+        allow_attachments !== undefined ? allow_attachments : true,
+        allow_voice !== undefined ? allow_voice : true,
+        allow_emoji !== undefined ? allow_emoji : true,
+        context_mode || "general",
+        context_rule_id || null,
+        welcome_message || "How can I help you today?",
+        placeholder_text || "Type your message here...",
+        new Date(),
+      ],
+    );
 
-    if (error) throw error;
+    const [insertedConfig] = await mysqlClient.query(
+      "SELECT * FROM widget_configs WHERE id = ?",
+      [result.insertId],
+    );
 
-    res.status(201).json(data);
+    res.status(201).json(insertedConfig[0]);
   } catch (error) {
     console.error("Error creating widget config:", error);
     res.status(500).json({ error: error.message });
@@ -368,14 +457,21 @@ app.post("/api/widget-configs", async (req, res) => {
 
 app.put("/api/widget-configs/:id", async (req, res) => {
   try {
-    if (!supabase) {
-      return res
-        .status(503)
-        .json({ error: "Database connection not available" });
+    if (!mysqlClient) {
+      mysqlClient = await getMySQLClient();
     }
 
     const { id } = req.params;
-    const updates = {};
+
+    // Check if config exists
+    const [existingConfigs] = await mysqlClient.query(
+      "SELECT * FROM widget_configs WHERE id = ?",
+      [id],
+    );
+
+    if (existingConfigs.length === 0) {
+      return res.status(404).json({ error: "Widget config not found" });
+    }
 
     // Only include fields that are provided in the request
     const allowedFields = [
@@ -392,26 +488,42 @@ app.put("/api/widget-configs/:id", async (req, res) => {
       "placeholder_text",
     ];
 
+    // Build update query dynamically
+    const updates = [];
+    const values = [];
+
     allowedFields.forEach((field) => {
       if (req.body[field] !== undefined) {
         // Convert camelCase to snake_case for database
         const dbField = field.replace(/([A-Z])/g, "_$1").toLowerCase();
-        updates[dbField] = req.body[field];
+        updates.push(`${dbField} = ?`);
+        values.push(req.body[field]);
       }
     });
 
-    const { data, error } = await supabase
-      .from("widget_configs")
-      .update(updates)
-      .eq("id", id)
-      .select()
-      .single();
+    if (updates.length === 0) {
+      return res.status(400).json({ error: "No valid fields to update" });
+    }
 
-    if (error) throw error;
-    if (!data)
-      return res.status(404).json({ error: "Widget config not found" });
+    updates.push("updated_at = ?");
+    values.push(new Date());
 
-    res.status(200).json(data);
+    // Add id as the last parameter
+    values.push(id);
+
+    // Execute update
+    await mysqlClient.query(
+      `UPDATE widget_configs SET ${updates.join(", ")} WHERE id = ?`,
+      values,
+    );
+
+    // Get updated config
+    const [updatedConfigs] = await mysqlClient.query(
+      "SELECT * FROM widget_configs WHERE id = ?",
+      [id],
+    );
+
+    res.status(200).json(updatedConfigs[0]);
   } catch (error) {
     console.error(`Error updating widget config ${req.params.id}:`, error);
     res.status(500).json({ error: error.message });
@@ -420,19 +532,24 @@ app.put("/api/widget-configs/:id", async (req, res) => {
 
 app.delete("/api/widget-configs/:id", async (req, res) => {
   try {
-    if (!supabase) {
-      return res
-        .status(503)
-        .json({ error: "Database connection not available" });
+    if (!mysqlClient) {
+      mysqlClient = await getMySQLClient();
     }
 
     const { id } = req.params;
-    const { error } = await supabase
-      .from("widget_configs")
-      .delete()
-      .eq("id", id);
 
-    if (error) throw error;
+    // Check if config exists
+    const [existingConfigs] = await mysqlClient.query(
+      "SELECT * FROM widget_configs WHERE id = ?",
+      [id],
+    );
+
+    if (existingConfigs.length === 0) {
+      return res.status(404).json({ error: "Widget config not found" });
+    }
+
+    // Delete the config
+    await mysqlClient.query("DELETE FROM widget_configs WHERE id = ?", [id]);
 
     res.status(204).send();
   } catch (error) {
@@ -444,29 +561,32 @@ app.delete("/api/widget-configs/:id", async (req, res) => {
 // Chat History API
 app.get("/api/chat-history", async (req, res) => {
   try {
-    if (!supabase) {
-      return res
-        .status(503)
-        .json({ error: "Database connection not available" });
+    if (!mysqlClient) {
+      mysqlClient = await getMySQLClient();
     }
 
     const { user_id, widget_id, limit = 50, offset = 0 } = req.query;
 
-    let query = supabase
-      .from("chat_messages")
-      .select("*")
-      .order("created_at", { ascending: false })
-      .limit(limit)
-      .offset(offset);
+    // Build query dynamically
+    let query = "SELECT * FROM chat_messages WHERE 1=1";
+    const params = [];
 
-    if (user_id) query = query.eq("user_id", user_id);
-    if (widget_id) query = query.eq("widget_id", widget_id);
+    if (user_id) {
+      query += " AND user_id = ?";
+      params.push(user_id);
+    }
 
-    const { data, error } = await query;
+    if (widget_id) {
+      query += " AND widget_id = ?";
+      params.push(widget_id);
+    }
 
-    if (error) throw error;
+    query += " ORDER BY created_at DESC LIMIT ? OFFSET ?";
+    params.push(parseInt(limit), parseInt(offset));
 
-    res.status(200).json(data);
+    const [messages] = await mysqlClient.query(query, params);
+
+    res.status(200).json(messages);
   } catch (error) {
     console.error("Error fetching chat history:", error);
     res.status(500).json({ error: error.message });
@@ -476,55 +596,41 @@ app.get("/api/chat-history", async (req, res) => {
 // Analytics API
 app.get("/api/analytics/overview", async (req, res) => {
   try {
-    if (!supabase) {
-      return res
-        .status(503)
-        .json({ error: "Database connection not available" });
+    if (!mysqlClient) {
+      mysqlClient = await getMySQLClient();
     }
 
     // Get total messages
-    const { count: totalMessages, error: messagesError } = await supabase
-      .from("chat_messages")
-      .count();
-
-    if (messagesError) throw messagesError;
+    const [messagesResult] = await mysqlClient.query(
+      "SELECT COUNT(*) as count FROM chat_messages",
+    );
+    const totalMessages = messagesResult[0].count;
 
     // Get total users
-    const { count: totalUsers, error: usersError } = await supabase
-      .from("users")
-      .count();
-
-    if (usersError) throw usersError;
+    const [usersResult] = await mysqlClient.query(
+      "SELECT COUNT(*) as count FROM users",
+    );
+    const totalUsers = usersResult[0].count;
 
     // Get total widgets
-    const { count: totalWidgets, error: widgetsError } = await supabase
-      .from("widget_configs")
-      .count();
-
-    if (widgetsError) throw widgetsError;
+    const [widgetsResult] = await mysqlClient.query(
+      "SELECT COUNT(*) as count FROM widget_configs",
+    );
+    const totalWidgets = widgetsResult[0].count;
 
     // Get messages per day for the last 7 days
     const sevenDaysAgo = new Date();
     sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
 
-    const { data: messagesPerDay, error: messagesPerDayError } = await supabase
-      .from("chat_messages")
-      .select("created_at")
-      .gte("created_at", sevenDaysAgo.toISOString());
-
-    if (messagesPerDayError) throw messagesPerDayError;
-
-    // Process messages per day
-    const messagesByDay = {};
-    messagesPerDay.forEach((message) => {
-      const date = new Date(message.created_at).toISOString().split("T")[0];
-      messagesByDay[date] = (messagesByDay[date] || 0) + 1;
-    });
+    const [messagesPerDay] = await mysqlClient.query(
+      "SELECT DATE(created_at) as date, COUNT(*) as count FROM chat_messages WHERE created_at >= ? GROUP BY DATE(created_at) ORDER BY date",
+      [sevenDaysAgo.toISOString()],
+    );
 
     // Format for chart display
-    const chartData = Object.entries(messagesByDay).map(([date, count]) => ({
-      date,
-      count,
+    const chartData = messagesPerDay.map((item) => ({
+      date: item.date.toISOString().split("T")[0],
+      count: item.count,
     }));
 
     res.status(200).json({
