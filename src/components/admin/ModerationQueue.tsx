@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useAuth } from "@/context/AuthContext";
 import moderationService, {
   FlaggedContent,
@@ -25,6 +25,7 @@ import {
   User,
   Paperclip,
 } from "lucide-react";
+import { useToast } from "@/components/ui/use-toast";
 
 export default function ModerationQueue() {
   const { user } = useAuth();
@@ -34,57 +35,97 @@ export default function ModerationQueue() {
   >("pending");
   const [loading, setLoading] = useState(true);
   const [contentDetails, setContentDetails] = useState<Record<string, any>>({});
+  const { toast } = useToast();
 
-  useEffect(() => {
-    loadFlaggedContent(activeTab);
-  }, [activeTab]);
-
-  const loadFlaggedContent = async (
-    status: "pending" | "approved" | "rejected",
-  ) => {
-    setLoading(true);
-    try {
-      const content = await moderationService.getModerationQueue(status);
-      setFlaggedContent(content);
-
-      // Load content details for messages
-      const messageIds = content
-        .filter((item) => item.contentType === "message")
-        .map((item) => item.contentId);
-
-      if (messageIds.length > 0) {
-        const details: Record<string, any> = {};
-
-        for (const id of messageIds) {
-          try {
-            // This is a simplified approach - in a real app, you'd batch these requests
-            const message = await chatService.getMessageById(id);
-            if (message) {
-              details[id] = message;
-            }
-          } catch (error) {
-            console.error(`Error fetching message ${id}:`, error);
-          }
-        }
-
-        setContentDetails((prev) => ({ ...prev, ...details }));
+  // Memoize the loadFlaggedContent function to prevent unnecessary re-renders
+  const loadFlaggedContent = useCallback(
+    async (status: "pending" | "approved" | "rejected") => {
+      if (!user) {
+        setLoading(false);
+        return;
       }
-    } catch (error) {
-      console.error("Error loading moderation queue:", error);
-    } finally {
-      setLoading(false);
+
+      setLoading(true);
+      try {
+        const content = await moderationService.getModerationQueue(status);
+        setFlaggedContent(content);
+
+        // Load content details for messages
+        const messageIds = content
+          .filter((item) => item.contentType === "message")
+          .map((item) => item.contentId);
+
+        if (messageIds.length > 0) {
+          const details: Record<string, any> = {};
+
+          // Process message IDs in batches to avoid too many concurrent requests
+          const batchSize = 5;
+          for (let i = 0; i < messageIds.length; i += batchSize) {
+            const batch = messageIds.slice(i, i + batchSize);
+            const batchPromises = batch.map(async (id) => {
+              try {
+                const message = await chatService.getMessageById(id);
+                if (message) {
+                  return { id, message };
+                }
+                return null;
+              } catch (error) {
+                console.error(`Error fetching message ${id}:`, error);
+                return null;
+              }
+            });
+
+            const results = await Promise.all(batchPromises);
+            results.forEach((result) => {
+              if (result) {
+                details[result.id] = result.message;
+              }
+            });
+          }
+
+          setContentDetails((prev) => ({ ...prev, ...details }));
+        }
+      } catch (error) {
+        console.error("Error loading moderation queue:", error);
+        toast({
+          title: "Error",
+          description: "Failed to load moderation queue. Please try again.",
+          variant: "destructive",
+        });
+      } finally {
+        setLoading(false);
+      }
+    },
+    [user, toast],
+  );
+
+  // Update dependencies to include the memoized function and user
+  useEffect(() => {
+    if (user) {
+      loadFlaggedContent(activeTab);
     }
-  };
+  }, [activeTab, loadFlaggedContent, user]);
 
   const handleReview = async (id: string, status: "approved" | "rejected") => {
     if (!user) return;
 
     try {
       await moderationService.reviewContent(id, status, user.id);
-      // Remove the reviewed item from the current list
-      setFlaggedContent((prev) => prev.filter((item) => item.id !== id));
+      // Show success toast
+      toast({
+        title: "Success",
+        description: `Content has been ${status === "approved" ? "approved" : "rejected"}.`,
+        variant: "default",
+      });
+      // Refresh the current tab after successful review
+      loadFlaggedContent(activeTab);
     } catch (error) {
       console.error("Error reviewing content:", error);
+      toast({
+        title: "Error",
+        description: "Failed to review content. Please try again.",
+        variant: "destructive",
+      });
     }
   };
 
@@ -132,12 +173,24 @@ export default function ModerationQueue() {
       return (
         <div className="mt-2 p-3 bg-gray-100 rounded-md">
           <p className="text-sm font-medium">Message Content:</p>
-          <p className="text-sm mt-1">{message.message}</p>
+          <p className="text-sm mt-1">{message.message || message.content}</p>
         </div>
       );
     }
     return null;
   };
+
+  if (!user) {
+    return (
+      <div className="container mx-auto py-6">
+        <Card>
+          <CardContent className="pt-6 text-center text-muted-foreground">
+            Please log in to access the moderation queue.
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
 
   return (
     <div className="container mx-auto py-6">

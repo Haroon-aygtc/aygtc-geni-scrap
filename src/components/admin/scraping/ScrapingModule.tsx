@@ -153,31 +153,76 @@ const ScrapingModule: React.FC = () => {
 
   const iframeRef = useRef<HTMLIFrameElement>(null);
 
-  // Load projects from localStorage on component mount
+  // Load projects from localStorage on component mount with improved error handling and data validation
   useEffect(() => {
-    const savedProjects = localStorage.getItem("scraping-projects");
-    if (savedProjects) {
-      try {
-        const parsedProjects = JSON.parse(savedProjects);
-        setProjects(parsedProjects);
-
-        // If there's at least one project, set it as current
-        if (parsedProjects.length > 0) {
-          const lastProject = parsedProjects[parsedProjects.length - 1];
-          setCurrentProject(lastProject);
-          setUrls(lastProject.urls || []);
-          setSelectors(lastProject.selectors || []);
-          setProjectName(lastProject.name);
-          if (lastProject.databaseConfig) {
-            setDbConfig(lastProject.databaseConfig);
-          }
-          if (lastProject.results) {
-            setResults(lastProject.results);
-          }
-        }
-      } catch (error) {
-        console.error("Error loading projects:", error);
+    try {
+      const savedProjects = localStorage.getItem("scraping-projects");
+      if (!savedProjects) {
+        // No saved projects, initialize with empty state
+        return;
       }
+
+      // Parse and validate saved projects
+      const parsedProjects = JSON.parse(savedProjects);
+
+      // Validate that parsedProjects is an array
+      if (!Array.isArray(parsedProjects)) {
+        console.error("Invalid projects data format:", parsedProjects);
+        toast({
+          title: "Data Error",
+          description: "Could not load saved projects: invalid data format",
+          variant: "destructive",
+        });
+        return;
+      }
+
+      // Filter out invalid projects and validate required fields
+      const validatedProjects = parsedProjects.filter((project) => {
+        return (
+          project &&
+          typeof project === "object" &&
+          project.id &&
+          project.name &&
+          Array.isArray(project.urls)
+        );
+      });
+
+      if (validatedProjects.length !== parsedProjects.length) {
+        console.warn(
+          `Filtered out ${parsedProjects.length - validatedProjects.length} invalid projects`,
+        );
+      }
+
+      setProjects(validatedProjects);
+
+      // If there's at least one project, set it as current
+      if (validatedProjects.length > 0) {
+        const lastProject = validatedProjects[validatedProjects.length - 1];
+        setCurrentProject(lastProject);
+        setUrls(Array.isArray(lastProject.urls) ? lastProject.urls : []);
+        setSelectors(
+          Array.isArray(lastProject.selectors) ? lastProject.selectors : [],
+        );
+        setProjectName(lastProject.name || "Unnamed Project");
+
+        if (lastProject.databaseConfig) {
+          setDbConfig(lastProject.databaseConfig);
+        }
+
+        if (Array.isArray(lastProject.results)) {
+          setResults(lastProject.results);
+        }
+      }
+    } catch (error) {
+      console.error("Error loading projects:", error);
+      toast({
+        title: "Load Error",
+        description:
+          "Failed to load saved projects. Starting with a new project.",
+        variant: "destructive",
+      });
+      // Initialize with a new project on error
+      createNewProject();
     }
   }, []);
 
@@ -324,47 +369,87 @@ const ScrapingModule: React.FC = () => {
     }
   };
 
-  // Save current project
+  // Save current project with improved error handling
   const saveCurrentProject = () => {
-    if (!projectName.trim()) {
+    try {
+      // Validate project name
+      if (!projectName.trim()) {
+        toast({
+          title: "Project Name Required",
+          description: "Please enter a name for your project",
+          variant: "destructive",
+        });
+        return;
+      }
+
+      // Validate project data
+      if (urls.length === 0 || urls.every((url) => !url.trim())) {
+        toast({
+          title: "URLs Required",
+          description: "Please add at least one valid URL to your project",
+          variant: "destructive",
+        });
+        return;
+      }
+
+      // Create project object with validated data
+      const projectToSave: Project = {
+        id:
+          currentProject?.id ||
+          `project_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`,
+        name: projectName.trim(),
+        urls: urls.filter((url) => url.trim()), // Remove empty URLs
+        selectors,
+        databaseConfig: dbConfig || undefined,
+        lastRun: currentProject?.lastRun,
+        results: results.length > 0 ? results : currentProject?.results,
+      };
+
+      let updatedProjects: Project[];
+
+      if (currentProject && projects.some((p) => p.id === projectToSave.id)) {
+        // Update existing project
+        updatedProjects = projects.map((p) =>
+          p.id === projectToSave.id ? projectToSave : p,
+        );
+      } else {
+        // Create new project
+        updatedProjects = [...projects, projectToSave];
+      }
+
+      // Update state
+      setProjects(updatedProjects);
+      setCurrentProject(projectToSave);
+
+      // Persist to localStorage with error handling
+      try {
+        localStorage.setItem(
+          "scraping-projects",
+          JSON.stringify(updatedProjects),
+        );
+      } catch (storageError) {
+        console.error("Error saving to localStorage:", storageError);
+        toast({
+          title: "Storage Warning",
+          description:
+            "Project saved in memory but could not be persisted to local storage",
+          variant: "warning",
+        });
+        return;
+      }
+
       toast({
-        title: "Project Name Required",
-        description: "Please enter a name for your project",
+        title: "Project Saved",
+        description: `Project "${projectName}" has been saved successfully`,
+      });
+    } catch (error) {
+      console.error("Error saving project:", error);
+      toast({
+        title: "Save Failed",
+        description: "An unexpected error occurred while saving the project",
         variant: "destructive",
       });
-      return;
     }
-
-    const projectToSave: Project = {
-      id: currentProject?.id || `project_${Date.now()}`,
-      name: projectName,
-      urls,
-      selectors,
-      databaseConfig: dbConfig || undefined,
-      lastRun: currentProject?.lastRun,
-      results: results.length > 0 ? results : currentProject?.results,
-    };
-
-    let updatedProjects: Project[];
-
-    if (currentProject && projects.some((p) => p.id === projectToSave.id)) {
-      // Update existing project
-      updatedProjects = projects.map((p) =>
-        p.id === projectToSave.id ? projectToSave : p,
-      );
-    } else {
-      // Create new project
-      updatedProjects = [...projects, projectToSave];
-    }
-
-    setProjects(updatedProjects);
-    setCurrentProject(projectToSave);
-    localStorage.setItem("scraping-projects", JSON.stringify(updatedProjects));
-
-    toast({
-      title: "Project Saved",
-      description: `Project "${projectName}" has been saved successfully`,
-    });
   };
 
   // Create new project
@@ -391,24 +476,73 @@ const ScrapingModule: React.FC = () => {
     setTestResults({});
   };
 
-  // Delete project
+  // Delete project with improved error handling and confirmation tracking
   const deleteProject = (projectId: string) => {
-    const updatedProjects = projects.filter((p) => p.id !== projectId);
-    setProjects(updatedProjects);
-    localStorage.setItem("scraping-projects", JSON.stringify(updatedProjects));
-
-    if (currentProject?.id === projectId) {
-      if (updatedProjects.length > 0) {
-        loadProject(updatedProjects[0]);
-      } else {
-        createNewProject();
+    try {
+      if (!projectId) {
+        toast({
+          title: "Invalid Operation",
+          description: "Cannot delete project: Invalid project ID",
+          variant: "destructive",
+        });
+        return;
       }
-    }
 
-    toast({
-      title: "Project Deleted",
-      description: "The project has been deleted successfully",
-    });
+      // Find the project to be deleted (for logging/confirmation)
+      const projectToDelete = projects.find((p) => p.id === projectId);
+      if (!projectToDelete) {
+        toast({
+          title: "Project Not Found",
+          description: "The specified project could not be found",
+          variant: "destructive",
+        });
+        return;
+      }
+
+      // Filter out the project to be deleted
+      const updatedProjects = projects.filter((p) => p.id !== projectId);
+      setProjects(updatedProjects);
+
+      // Persist to localStorage with error handling
+      try {
+        localStorage.setItem(
+          "scraping-projects",
+          JSON.stringify(updatedProjects),
+        );
+      } catch (storageError) {
+        console.error(
+          "Error updating localStorage after deletion:",
+          storageError,
+        );
+        toast({
+          title: "Storage Warning",
+          description:
+            "Project removed from memory but local storage could not be updated",
+          variant: "warning",
+        });
+      }
+
+      // Handle current project selection after deletion
+      if (currentProject?.id === projectId) {
+        if (updatedProjects.length > 0) {
+          loadProject(updatedProjects[0]);
+        } else {
+          createNewProject();
+        }
+      }
+
+      toast({
+        title: "Project Deleted",
+        description: `Project "${projectToDelete.name}" has been deleted successfully`,
+      });
+    } catch (error) {
+      console.error("Error deleting project:", error);
+      toast({
+        title: "Delete Failed",
+        description: "An unexpected error occurred while deleting the project",
+        variant: "destructive",
+      });
+    }
   };
 
   // Start scraping

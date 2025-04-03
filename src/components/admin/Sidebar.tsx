@@ -181,32 +181,47 @@ const Sidebar = ({
     },
   ];
 
-  // Determine active item based on current path
+  // Determine active item based on current path with optimized logic
   const getActiveItemFromPath = (path: string) => {
     // Remove trailing slash if present
     const normalizedPath = path.endsWith("/") ? path.slice(0, -1) : path;
 
-    // Check for exact matches first
-    for (const item of menuItems) {
-      if (normalizedPath === item.path) {
-        return item.id;
-      }
+    // Create a map of path lengths for more efficient sorting
+    const pathMap = new Map<
+      string,
+      { id: string; isSubmenu: boolean; parentId?: string }
+    >();
 
-      // Check submenu items
+    // Populate the map with all paths
+    menuItems.forEach((item) => {
+      // Add main menu item
+      pathMap.set(item.path, { id: item.id, isSubmenu: false });
+
+      // Add submenu items if they exist
       if (item.submenu) {
-        for (const subItem of item.submenu) {
-          if (normalizedPath === subItem.path) {
-            return `${item.id}-${subItem.id}`;
-          }
-        }
+        item.submenu.forEach((subItem) => {
+          pathMap.set(subItem.path, {
+            id: `${item.id}-${subItem.id}`,
+            isSubmenu: true,
+            parentId: item.id,
+          });
+        });
       }
+    });
+
+    // First check for exact matches which take priority
+    if (pathMap.has(normalizedPath)) {
+      return pathMap.get(normalizedPath)!.id;
     }
 
-    // Check for partial matches (for nested routes)
-    for (const item of menuItems) {
-      if (normalizedPath.startsWith(item.path) && item.path !== "/") {
-        return item.id;
-      }
+    // If no exact match, find the longest matching path prefix
+    // Sort paths by length (descending) for most specific match first
+    const sortedPaths = Array.from(pathMap.keys())
+      .filter((p) => p !== "/" && normalizedPath.startsWith(p))
+      .sort((a, b) => b.length - a.length);
+
+    if (sortedPaths.length > 0) {
+      return pathMap.get(sortedPaths[0])!.id;
     }
 
     return "dashboard"; // Default to dashboard if no match
@@ -220,20 +235,28 @@ const Sidebar = ({
     templates: false,
   });
 
-  // Update active item when location changes
+  // Update active item when location changes with memoization
   useEffect(() => {
     const newActiveItem = getActiveItemFromPath(location.pathname);
-    setActiveItem(newActiveItem);
 
-    // Expand parent menu if a submenu item is active
-    if (newActiveItem.includes("-")) {
-      const parentId = newActiveItem.split("-")[0];
-      setExpandedMenus((prev) => ({
-        ...prev,
-        [parentId]: true,
-      }));
+    // Only update state if the active item has changed
+    if (newActiveItem !== activeItem) {
+      setActiveItem(newActiveItem);
+
+      // Expand parent menu if a submenu item is active
+      if (newActiveItem.includes("-")) {
+        const parentId = newActiveItem.split("-")[0];
+        setExpandedMenus((prev) => {
+          // Only update if the menu isn't already expanded
+          if (prev[parentId]) return prev;
+          return {
+            ...prev,
+            [parentId]: true,
+          };
+        });
+      }
     }
-  }, [location.pathname]);
+  }, [location.pathname, activeItem]);
 
   const toggleMenu = (menu: string) => {
     setExpandedMenus((prev) => ({

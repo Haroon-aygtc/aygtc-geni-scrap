@@ -81,6 +81,11 @@ const mapActivityToInterface = (activity: any): UserActivity => {
  * @returns User profile or null if not found
  */
 export const getUser = async (userId: string): Promise<UserProfile | null> => {
+  if (!userId) {
+    logger.warn("getUser called with empty userId");
+    return null;
+  }
+
   try {
     const sequelize = await getMySQLClient();
     const users = await sequelize.query(
@@ -92,40 +97,82 @@ export const getUser = async (userId: string): Promise<UserProfile | null> => {
     );
 
     if (!users || users.length === 0) {
+      logger.info(`User not found with ID: ${userId}`);
       return null;
     }
 
     return mapUserToProfile(users[0]);
   } catch (error) {
     logger.error(`Error getting user ${userId}`, error);
-    return null;
+    throw new Error(`Failed to retrieve user: ${error.message}`);
   }
 };
 
 /**
- * Get all users
+ * Get all users with pagination and filtering options
  * @param limit Maximum number of users to return
  * @param offset Offset for pagination
  * @param includeInactive Include inactive users
+ * @param searchTerm Optional search term to filter users by name or email
+ * @param sortBy Field to sort by (default: created_at)
+ * @param sortOrder Sort order (asc or desc)
  * @returns Array of user profiles
  */
 export const getUsers = async (
   limit: number = 50,
   offset: number = 0,
   includeInactive: boolean = false,
+  searchTerm?: string,
+  sortBy: string = "created_at",
+  sortOrder: "asc" | "desc" = "desc",
 ): Promise<UserProfile[]> => {
   try {
     const sequelize = await getMySQLClient();
 
+    // Build the query with proper SQL injection protection
     let query = "SELECT * FROM users";
     const replacements: any = {};
+    const whereConditions: string[] = [];
 
+    // Add active/inactive filter
     if (!includeInactive) {
-      query += " WHERE is_active = :isActive";
+      whereConditions.push("is_active = :isActive");
       replacements.isActive = true;
     }
 
-    query += " ORDER BY created_at DESC LIMIT :limit OFFSET :offset";
+    // Add search term filter if provided
+    if (searchTerm) {
+      whereConditions.push(
+        "(email LIKE :searchTerm OR full_name LIKE :searchTerm)",
+      );
+      replacements.searchTerm = `%${searchTerm}%`;
+    }
+
+    // Add WHERE clause if we have conditions
+    if (whereConditions.length > 0) {
+      query += " WHERE " + whereConditions.join(" AND ");
+    }
+
+    // Validate and sanitize sort field to prevent SQL injection
+    const validSortFields = [
+      "created_at",
+      "updated_at",
+      "email",
+      "full_name",
+      "last_login_at",
+    ];
+    const sanitizedSortBy = validSortFields.includes(sortBy)
+      ? sortBy
+      : "created_at";
+
+    // Validate sort order
+    const sanitizedSortOrder = sortOrder === "asc" ? "ASC" : "DESC";
+
+    // Add ORDER BY clause
+    query += ` ORDER BY ${sanitizedSortBy} ${sanitizedSortOrder}`;
+
+    // Add pagination
+    query += " LIMIT :limit OFFSET :offset";
     replacements.limit = limit;
     replacements.offset = offset;
 
@@ -146,23 +193,53 @@ export const getUsers = async (
  * @param userId User ID
  * @param updates Updates to apply
  * @returns Updated user profile
+ * @throws Error if update fails
  */
 export const updateUser = async (
   userId: string,
   updates: Partial<UserProfile>,
 ): Promise<UserProfile | null> => {
+  if (!userId) {
+    throw new Error("User ID is required for update operation");
+  }
+
+  if (!updates || Object.keys(updates).length === 0) {
+    logger.warn(`Update called with no changes for user ${userId}`);
+    return getUser(userId);
+  }
+
   try {
     const sequelize = await getMySQLClient();
+
+    // Validate user exists before updating
+    const existingUser = await getUser(userId);
+    if (!existingUser) {
+      logger.warn(`Attempted to update non-existent user: ${userId}`);
+      throw new Error(`User with ID ${userId} not found`);
+    }
 
     // Convert from UserProfile format to database format
     const updateData: Record<string, any> = {};
     if (updates.fullName !== undefined) updateData.full_name = updates.fullName;
     if (updates.avatarUrl !== undefined)
       updateData.avatar_url = updates.avatarUrl;
-    if (updates.role !== undefined) updateData.role = updates.role;
+    if (updates.role !== undefined) {
+      // Validate role
+      const validRoles = ["admin", "user", "guest"];
+      if (!validRoles.includes(updates.role)) {
+        throw new Error(
+          `Invalid role: ${updates.role}. Must be one of: ${validRoles.join(", ")}`,
+        );
+      }
+      updateData.role = updates.role;
+    }
     if (updates.isActive !== undefined) updateData.is_active = updates.isActive;
-    if (updates.metadata !== undefined)
-      updateData.metadata = JSON.stringify(updates.metadata);
+    if (updates.metadata !== undefined) {
+      updateData.metadata =
+        typeof updates.metadata === "string"
+          ? updates.metadata
+          : JSON.stringify(updates.metadata);
+    }
 
     // Add updated_at timestamp
     updateData.updated_at = new Date().toISOString();
@@ -175,16 +252,28 @@ export const updateUser = async (
     // Add userId to replacements
     const replacements = { ...updateData, userId };
 
-    await sequelize.query(`UPDATE users SET ${setClause} WHERE id = :userId`, {
-      replacements,
-      type: QueryTypes.UPDATE,
+    const [affectedRows] = await sequelize.query(
+      `UPDATE users SET ${setClause} WHERE id = :userId`,
+      {
+        replacements,
+        type: QueryTypes.UPDATE,
+      },
+    );
+
+    if (affectedRows === 0) {
+      logger.warn(`No rows affected when updating user ${userId}`);
+    }
+
+    // Log the update activity
+    await logUserActivity(userId, "profile_updated", {
+      fields: Object.keys(updates),
     });
 
     // Get the updated user
     return getUser(userId);
   } catch (error) {
     logger.error(`Error updating user ${userId}`, error);
-    throw error;
+    throw new Error(`Failed to update user: ${error.message}`);
   }
 };
 
@@ -249,26 +338,36 @@ export const reactivateUser = async (userId: string): Promise<boolean> => {
 };
 
 /**
- * Get user activity
+ * Get user activity with pagination and filtering
  * @param userId User ID
  * @param limit Maximum number of activities to return
  * @param offset Offset for pagination
+ * @param actionType Optional filter by action type
  * @returns Array of user activities
  */
 export const getUserActivity = async (
   userId: string,
   limit: number = 50,
   offset: number = 0,
+  actionType?: string,
 ): Promise<UserActivity[]> => {
   try {
     const sequelize = await getMySQLClient();
-    const activities = await sequelize.query(
-      "SELECT * FROM user_activity WHERE user_id = :userId ORDER BY created_at DESC LIMIT :limit OFFSET :offset",
-      {
-        replacements: { userId, limit, offset },
-        type: QueryTypes.SELECT,
-      },
-    );
+
+    let query = "SELECT * FROM user_activity WHERE user_id = :userId";
+    const replacements: any = { userId, limit, offset };
+
+    if (actionType) {
+      query += " AND action = :actionType";
+      replacements.actionType = actionType;
+    }
+
+    query += " ORDER BY created_at DESC LIMIT :limit OFFSET :offset";
+
+    const activities = await sequelize.query(query, {
+      replacements,
+      type: QueryTypes.SELECT,
+    });
 
     return activities.map(mapActivityToInterface);
   } catch (error) {
@@ -370,11 +469,25 @@ export const getUserStats = async (): Promise<any> => {
     );
     const newUsers = newUsersResult.count;
 
+    // Get active users in last 7 days (users with login activity)
+    const sevenDaysAgo = new Date();
+    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+
+    const [activeLastWeekResult] = await sequelize.query(
+      "SELECT COUNT(DISTINCT user_id) as count FROM user_activity WHERE action = 'login' AND created_at >= :sevenDaysAgo",
+      {
+        replacements: { sevenDaysAgo: sevenDaysAgo.toISOString() },
+        type: QueryTypes.SELECT,
+      },
+    );
+    const activeLastWeek = activeLastWeekResult.count;
+
     return {
       totalUsers: totalUsers || 0,
       activeUsers: activeUsers || 0,
       inactiveUsers: (totalUsers || 0) - (activeUsers || 0),
       newUsersLast30Days: newUsers || 0,
+      activeUsersLast7Days: activeLastWeek || 0,
       usersByRole: roleData || [],
     };
   } catch (error) {
