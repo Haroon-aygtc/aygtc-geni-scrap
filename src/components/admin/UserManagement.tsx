@@ -70,7 +70,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { format } from "date-fns";
-import supabase from "@/services/supabaseClient";
+import axios from "axios";
 import { Label } from "@/components/ui/label";
 
 // Define user schema
@@ -134,17 +134,25 @@ const UserManagement = () => {
   const fetchUsers = async () => {
     setLoading(true);
     try {
-      // Fetch users from Supabase using our API service
-      const response = await supabase
-        .from("users")
-        .select("*", { count: "exact" });
+      // Fetch users from MySQL using our API service
+      const response = await axios.get("/api/users", {
+        params: {
+          page,
+          limit: pageSize,
+          search: searchTerm,
+          role: roleFilter,
+          status: statusFilter,
+        },
+      });
 
-      if (response.error) {
-        throw response.error;
+      if (!response.data.success) {
+        throw new Error(
+          response.data.error?.message || "Failed to fetch users",
+        );
       }
 
       // Process the users data
-      const supabaseUsers = response.data.map((user) => ({
+      const users = response.data.data.map((user) => ({
         id: user.id,
         name: user.full_name || user.email.split("@")[0],
         email: user.email,
@@ -157,67 +165,12 @@ const UserManagement = () => {
         createdAt: user.created_at,
       }));
 
-      // Apply filters
-      let filteredUsers = [...supabaseUsers];
+      // Pagination is handled server-side
+      const paginatedUsers = users;
 
-      if (searchTerm) {
-        filteredUsers = filteredUsers.filter(
-          (user) =>
-            user.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-            user.email.toLowerCase().includes(searchTerm.toLowerCase()),
-        );
-      }
-
-      if (roleFilter) {
-        filteredUsers = filteredUsers.filter(
-          (user) => user.role === roleFilter,
-        );
-      }
-
-      if (statusFilter) {
-        filteredUsers = filteredUsers.filter((user) =>
-          statusFilter === "active" ? user.isActive : !user.isActive,
-        );
-      }
-
-      // Apply pagination
-      const start = (page - 1) * pageSize;
-      const end = start + pageSize;
-      const paginatedUsers = filteredUsers.slice(start, end);
-
-      // Fetch last login for each user
-      const usersWithActivity = await Promise.all(
-        paginatedUsers.map(async (user) => {
-          try {
-            // Get last login from user_activity table
-            const activityResponse = await supabase
-              .from("user_activity")
-              .select("*")
-              .eq("user_id", user.id)
-              .eq("action", "login")
-              .order("created_at", { ascending: false })
-              .limit(1);
-
-            if (!activityResponse.error && activityResponse.data.length > 0) {
-              return {
-                ...user,
-                lastLogin: activityResponse.data[0].created_at,
-              };
-            }
-
-            return user;
-          } catch (error) {
-            console.error(
-              `Error fetching activity for user ${user.id}:`,
-              error,
-            );
-            return user;
-          }
-        }),
-      );
-
-      setUsers(usersWithActivity);
-      setTotalPages(Math.ceil(filteredUsers.length / pageSize));
+      // Last login is included in the user data from the API
+      setUsers(paginatedUsers);
+      setTotalPages(Math.ceil(response.data.meta.pagination.total / pageSize));
     } catch (error) {
       console.error("Error fetching users:", error);
     } finally {
@@ -227,61 +180,29 @@ const UserManagement = () => {
 
   const handleCreateUser = async (data: UserFormValues) => {
     try {
-      // Create user in Supabase
-      const { data: userData, error } = await supabase
-        .from("users")
-        .insert([
-          {
-            email: data.email,
-            full_name: data.name,
-            role: data.role,
-            is_active: data.isActive,
-            avatar_url: `https://api.dicebear.com/7.x/avataaars/svg?seed=${data.email}`,
-          },
-        ])
-        .select()
-        .single();
+      // Create user via API
+      const response = await axios.post("/api/users", {
+        email: data.email,
+        full_name: data.name,
+        role: data.role,
+        is_active: data.isActive,
+        password: data.password,
+        avatar_url: `https://api.dicebear.com/7.x/avataaars/svg?seed=${data.email}`,
+      });
 
-      if (error) throw error;
-
-      // If password is provided, create auth user
-      if (data.password) {
-        try {
-          const { error: authError } = await supabase.auth.admin.createUser({
-            email: data.email,
-            password: data.password,
-            email_confirm: true,
-          });
-
-          if (authError) {
-            console.error("Error creating auth user:", authError);
-            // Continue anyway as the database user was created
-          } else {
-            // Update the user with the auth_id
-            const { data: authData } = await supabase.auth.admin.getUserByEmail(
-              data.email,
-            );
-            if (authData?.user) {
-              await supabase
-                .from("users")
-                .update({ auth_id: authData.user.id })
-                .eq("id", userData.id);
-            }
-          }
-        } catch (authError) {
-          console.error("Error in auth user creation:", authError);
-          // Continue anyway as the database user was created
-        }
+      if (!response.data.success) {
+        throw new Error(
+          response.data.error?.message || "Failed to create user",
+        );
       }
 
-      // Log the activity
-      await supabase.from("user_activity").insert([
-        {
-          user_id: userData.id,
-          action: "user_created",
-          metadata: { created_by: "admin" },
-        },
-      ]);
+      const userData = response.data.data;
+
+      // Log the activity (handled server-side)
+      await axios.post("/api/users/activity", {
+        action: "user_created",
+        metadata: { created_by: "admin" },
+      });
 
       // Add the new user to the list
       const newUser: User = {
@@ -294,7 +215,8 @@ const UserManagement = () => {
         createdAt: userData.created_at,
       };
 
-      setUsers([...users, newUser]);
+      // Refresh the user list instead of manually adding
+      fetchUsers();
       setIsCreateDialogOpen(false);
       form.reset();
     } catch (error) {
@@ -317,45 +239,30 @@ const UserManagement = () => {
     if (!selectedUser) return;
 
     try {
-      // Update user in Supabase
-      const { data: userData, error } = await supabase
-        .from("users")
-        .update({
-          email: data.email,
-          full_name: data.name,
-          role: data.role,
-          is_active: data.isActive,
-          updated_at: new Date().toISOString(),
-        })
-        .eq("id", selectedUser.id)
-        .select()
-        .single();
+      // Update user via API
+      const response = await axios.put(`/api/users/${selectedUser.id}`, {
+        email: data.email,
+        full_name: data.name,
+        role: data.role,
+        is_active: data.isActive,
+      });
 
-      if (error) throw error;
+      if (!response.data.success) {
+        throw new Error(
+          response.data.error?.message || "Failed to update user",
+        );
+      }
+
+      const userData = response.data.data;
 
       // Log the activity
-      await supabase.from("user_activity").insert([
-        {
-          user_id: selectedUser.id,
-          action: "user_updated",
-          metadata: { updated_by: "admin" },
-        },
-      ]);
+      await axios.post("/api/users/activity", {
+        action: "user_updated",
+        metadata: { updated_by: "admin" },
+      });
 
-      // Update the user in the list
-      const updatedUsers = users.map((user) =>
-        user.id === selectedUser.id
-          ? {
-              ...user,
-              name: userData.full_name || userData.email.split("@")[0],
-              email: userData.email,
-              role: userData.role,
-              isActive: userData.is_active,
-            }
-          : user,
-      );
-
-      setUsers(updatedUsers);
+      // Refresh the user list instead of manually updating
+      fetchUsers();
       setIsEditDialogOpen(false);
       setSelectedUser(null);
       form.reset();
@@ -373,42 +280,19 @@ const UserManagement = () => {
     if (!selectedUser) return;
 
     try {
-      // First check if user has an auth_id
-      const { data: userData, error: userError } = await supabase
-        .from("users")
-        .select("auth_id")
-        .eq("id", selectedUser.id)
-        .single();
+      // Delete user via API
+      const response = await axios.delete(`/api/users/${selectedUser.id}`);
 
-      if (userError) throw userError;
-
-      // If user has an auth_id, delete the auth user
-      if (userData?.auth_id) {
-        try {
-          const { error: authError } = await supabase.auth.admin.deleteUser(
-            userData.auth_id,
-          );
-          if (authError) {
-            console.error("Error deleting auth user:", authError);
-            // Continue anyway to delete the database user
-          }
-        } catch (authError) {
-          console.error("Error in auth user deletion:", authError);
-          // Continue anyway to delete the database user
-        }
+      if (!response.data.success && response.status !== 204) {
+        throw new Error(
+          response.data.error?.message || "Failed to delete user",
+        );
       }
-
-      // Delete the user from the database
-      const { error } = await supabase
-        .from("users")
-        .delete()
-        .eq("id", selectedUser.id);
 
       if (error) throw error;
 
-      // Update the UI
-      const updatedUsers = users.filter((user) => user.id !== selectedUser.id);
-      setUsers(updatedUsers);
+      // Refresh the user list
+      fetchUsers();
       setIsDeleteDialogOpen(false);
       setSelectedUser(null);
     } catch (error) {
@@ -421,25 +305,22 @@ const UserManagement = () => {
     setLoading(true);
 
     try {
-      // Fetch user activity from Supabase
-      const { data: activityData, error: activityError } = await supabase
-        .from("user_activity")
-        .select("*")
-        .eq("user_id", user.id)
-        .order("created_at", { ascending: false })
-        .limit(20);
+      // Fetch user activity from API
+      const activityResponse = await axios.get(`/api/users/activity`, {
+        params: {
+          userId: user.id,
+          limit: 20,
+        },
+      });
 
-      if (activityError) throw activityError;
+      if (!activityResponse.data.success) {
+        throw new Error(
+          activityResponse.data.error?.message ||
+            "Failed to fetch user activity",
+        );
+      }
 
-      // Fetch user sessions
-      const { data: sessionData, error: sessionError } = await supabase
-        .from("user_sessions")
-        .select("*")
-        .eq("user_id", user.id)
-        .order("last_active_at", { ascending: false })
-        .limit(5);
-
-      if (sessionError) throw sessionError;
+      const activityData = activityResponse.data.data;
 
       // Format the activity data
       const formattedActivity =
