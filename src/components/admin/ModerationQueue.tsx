@@ -3,7 +3,7 @@ import { useAuth } from "@/context/AuthContext";
 import moderationService, {
   FlaggedContent,
 } from "@/services/moderationService";
-import chatService from "@/services/chatService";
+import { chatService } from "@/services/chatService";
 import { Button } from "@/components/ui/button";
 import {
   Card,
