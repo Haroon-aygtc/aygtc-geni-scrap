@@ -26,7 +26,7 @@ const aiCacheService = {
       const promptHash = await createHash(prompt);
 
       const now = new Date();
-      const sequelize = getMySQLClient();
+      const sequelize = await getMySQLClient();
 
       // Find cache entry in database
       const [cacheEntry] = await sequelize.query(
@@ -78,7 +78,7 @@ const aiCacheService = {
 
       const now = new Date();
       const expiresAt = new Date(now.getTime() + ttlSeconds * 1000);
-      const sequelize = getMySQLClient();
+      const sequelize = await getMySQLClient();
 
       // Check if entry already exists
       const [existingEntry] = await sequelize.query(
@@ -145,7 +145,7 @@ const aiCacheService = {
   clearExpiredCache: async (): Promise<number> => {
     try {
       const now = new Date();
-      const sequelize = getMySQLClient();
+      const sequelize = await getMySQLClient();
 
       // Delete expired cache entries
       const [result] = await sequelize.query(
@@ -174,7 +174,7 @@ const aiCacheService = {
     model?: string,
   ): Promise<number> => {
     try {
-      const sequelize = getMySQLClient();
+      const sequelize = await getMySQLClient();
       let query = `DELETE FROM ai_response_cache WHERE prompt LIKE ?`;
       const replacements = [`%${promptPattern}%`];
 
