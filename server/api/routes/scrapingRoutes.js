@@ -373,15 +373,57 @@ router.post("/save-db", authenticateJWT, async (req, res) => {
     });
   }
 
+  // Validate table name to prevent SQL injection
+  const tableNameRegex = /^[a-zA-Z0-9_]+$/;
+  if (!tableNameRegex.test(dbConfig.table)) {
+    return res.status(400).json({
+      success: false,
+      error: "Invalid table name format",
+    });
+  }
+
+  // Validate column names to prevent SQL injection
+  for (const columnName of Object.values(dbConfig.columns)) {
+    if (!tableNameRegex.test(columnName)) {
+      return res.status(400).json({
+        success: false,
+        error: `Invalid column name format: ${columnName}`,
+      });
+    }
+  }
+
+  let sequelize;
+  let transaction;
+
   try {
-    const sequelize = await getMySQLClient();
-    const transaction = await sequelize.transaction();
+    sequelize = await getMySQLClient();
+    transaction = await sequelize.transaction();
 
-    try {
-      // Process each result
-      for (const result of results) {
-        if (!result.success) continue;
+    // Check if table exists
+    const [tableExists] = await sequelize.query(
+      `SELECT COUNT(*) as count FROM information_schema.tables 
+       WHERE table_schema = DATABASE() AND table_name = ?`,
+      {
+        replacements: [dbConfig.table],
+        type: sequelize.QueryTypes.SELECT,
+        transaction,
+      },
+    );
 
+    if (!tableExists || tableExists.count === 0) {
+      await transaction.rollback();
+      return res.status(404).json({
+        success: false,
+        error: `Table '${dbConfig.table}' does not exist in the database`,
+      });
+    }
+
+    // Process each result
+    const successCount = 0;
+    for (const result of results) {
+      if (!result.success) continue;
+
+      try {
         // Prepare column data mapping
         const columnData = {};
 
@@ -417,26 +459,54 @@ router.post("/save-db", authenticateJWT, async (req, res) => {
             transaction,
           },
         );
+
+        successCount++;
+      } catch (itemError) {
+        console.error(`Error processing item from ${result.url}:`, itemError);
+        // Continue with other items instead of failing the entire batch
       }
-
-      // Commit transaction
-      await transaction.commit();
-
-      res.json({
-        success: true,
-        message: `Successfully saved ${results.filter((r) => r.success).length} results to table ${dbConfig.table}`,
-      });
-    } catch (dbError) {
-      // Rollback transaction on error
-      await transaction.rollback();
-      throw dbError;
     }
+
+    // Commit transaction
+    await transaction.commit();
+
+    res.json({
+      success: true,
+      message: `Successfully saved ${successCount} results to table ${dbConfig.table}`,
+    });
   } catch (error) {
     console.error("Error saving to database:", error);
-    res.status(500).json({
-      success: false,
-      error: `Failed to save to database: ${error.message}`,
-    });
+
+    // Ensure transaction is rolled back if it exists
+    if (transaction) {
+      try {
+        await transaction.rollback();
+      } catch (rollbackError) {
+        console.error("Error rolling back transaction:", rollbackError);
+      }
+    }
+
+    // Send appropriate error response based on error type
+    if (
+      error.name === "SequelizeConnectionError" ||
+      error.name === "SequelizeConnectionRefusedError"
+    ) {
+      res.status(503).json({
+        success: false,
+        error: "Database connection failed. Please try again later.",
+      });
+    } else if (error.name === "SequelizeUniqueConstraintError") {
+      res.status(409).json({
+        success: false,
+        error:
+          "Duplicate entry detected. Some records may already exist in the database.",
+      });
+    } else {
+      res.status(500).json({
+        success: false,
+        error: `Failed to save to database: ${error.message}`,
+      });
+    }
   }
 });
 

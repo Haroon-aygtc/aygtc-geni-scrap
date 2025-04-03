@@ -51,14 +51,39 @@ const DatabaseConfigPanel: React.FC<DatabaseConfigPanelProps> = ({
         setLoading(true);
         setError(null);
 
-        // In production, this would call your API endpoint
-        const response = await axios.get("/api/scraping/database/tables");
-        setTables(response.data);
+        // Call the API endpoint to get database tables and columns
+        const response = await axios.get("/api/scraping/database/tables", {
+          timeout: 10000, // 10 second timeout
+        });
+
+        if (response.data && Array.isArray(response.data)) {
+          setTables(response.data);
+        } else {
+          throw new Error("Invalid response format from server");
+        }
       } catch (err) {
         console.error("Error fetching database tables:", err);
-        setError(
-          "Failed to load database tables. Please check your database connection.",
-        );
+
+        // More descriptive error message based on the error type
+        if (err.code === "ECONNABORTED") {
+          setError(
+            "Connection timeout. The database server might be overloaded or unreachable.",
+          );
+        } else if (err.response) {
+          // The request was made and the server responded with a status code
+          // that falls out of the range of 2xx
+          setError(
+            `Server error: ${err.response.status} - ${err.response.data?.message || "Unknown error"}`,
+          );
+        } else if (err.request) {
+          // The request was made but no response was received
+          setError(
+            "No response from server. Please check your network connection.",
+          );
+        } else {
+          // Something happened in setting up the request that triggered an Error
+          setError(`Failed to load database tables: ${err.message}`);
+        }
 
         // Fallback to mock data for development
         const mockTables: TableInfo[] = [
@@ -246,7 +271,9 @@ const DatabaseConfigPanel: React.FC<DatabaseConfigPanelProps> = ({
                             }
                           >
                             <SelectTrigger>
-                              <SelectValue placeholder="Select column" />
+                              <SelectValue placeholder="Select column">
+                                {columnMappings[selector.id] || ""}
+                              </SelectValue>
                             </SelectTrigger>
                             <SelectContent>
                               <SelectItem value="">-- Skip --</SelectItem>

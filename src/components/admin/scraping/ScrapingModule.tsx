@@ -146,7 +146,7 @@ const ScrapingModule: React.FC = () => {
       // Call the API to save the results to a file
       const response = await axios.post("/api/scraping/save-file", {
         results,
-        outputFolder,
+        filename: `scraping_results_${new Date().toISOString().replace(/[:.]/g, "-")}.json`,
       });
 
       toast({
@@ -192,7 +192,7 @@ const ScrapingModule: React.FC = () => {
       setIsLoading(true);
 
       // Call the API to save the results to the database
-      const response = await axios.post("/api/scraping/save-database", {
+      const response = await axios.post("/api/scraping/save-db", {
         results,
         dbConfig,
       });
