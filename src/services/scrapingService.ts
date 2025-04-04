@@ -1,6 +1,7 @@
 import axios from "axios";
-import { getMySQLClient, QueryTypes } from "@/services/mysqlClient";
+import { getMySQLClient, QueryTypes } from "./mysqlClient.js";
 import { v4 as uuidv4 } from "uuid";
+import logger from "@/utils/logger";
 
 export interface SelectorConfig {
   id: string;
@@ -53,7 +54,7 @@ export interface ScrapingResult {
 export interface DatabaseConfig {
   table: string;
   columns: Record<string, string>; // Maps selector IDs to column names
-  dbType?: "postgres" | "mysql" | "sqlite" | "mongodb";
+  dbType?: "mysql";
   options?: {
     includeTimestamp?: boolean;
     includeUrl?: boolean;
@@ -223,7 +224,7 @@ class ScrapingService {
 
       return results;
     } catch (error) {
-      console.error("Error in scrapeMultipleUrls:", error);
+      logger.error("Error in scrapeMultipleUrls:", error);
       throw new Error(`Failed to scrape multiple URLs: ${error.message}`);
     }
   }
@@ -259,7 +260,7 @@ class ScrapingService {
     }
 
     // All retries failed
-    console.error(
+    logger.error(
       `Error scraping URL ${url} after ${attempts} attempts:`,
       lastError,
     );
@@ -291,15 +292,108 @@ class ScrapingService {
     dbConfig: DatabaseConfig,
   ): Promise<boolean> {
     try {
-      const response = await axios.post("/api/scraping/save-db", {
-        results,
-        dbConfig,
-      });
-      return response.data.success;
-    } catch (error: any) {
-      console.error("Error saving scraping results to database:", error);
+      const db = await getMySQLClient();
+      const transaction = await db.transaction();
+
+      try {
+        // Create table if it doesn't exist
+        const createTableQuery = this.generateCreateTableQuery(dbConfig);
+        await db.query(createTableQuery, { transaction, type: QueryTypes.RAW });
+
+        // Insert data
+        for (const result of results) {
+          if (!result.success) continue;
+
+          const insertQuery = this.generateInsertQuery(result, dbConfig);
+          await db.query(insertQuery.query, {
+            replacements: insertQuery.values,
+            transaction,
+            type: QueryTypes.INSERT,
+          });
+        }
+
+        await transaction.commit();
+        return true;
+      } catch (error) {
+        await transaction.rollback();
+        throw error;
+      }
+    } catch (error) {
+      logger.error("Error saving scraping results to database:", error);
       throw new Error(`Failed to save results to database: ${error.message}`);
     }
+  }
+
+  /**
+   * Generate CREATE TABLE query based on database config
+   */
+  private generateCreateTableQuery(dbConfig: DatabaseConfig): string {
+    const columns = [];
+
+    // Add ID column
+    columns.push("id VARCHAR(36) PRIMARY KEY");
+
+    // Add URL column if needed
+    if (dbConfig.options?.includeUrl) {
+      columns.push("url VARCHAR(2048) NOT NULL");
+    }
+
+    // Add timestamp column if needed
+    if (dbConfig.options?.includeTimestamp) {
+      columns.push("created_at DATETIME DEFAULT CURRENT_TIMESTAMP");
+    }
+
+    // Add columns for each selector
+    for (const [selectorId, columnName] of Object.entries(dbConfig.columns)) {
+      columns.push(`${columnName} TEXT`);
+    }
+
+    // Add metadata column
+    columns.push("metadata JSON");
+
+    return `CREATE TABLE IF NOT EXISTS ${dbConfig.table} (${columns.join(", ")})`;
+  }
+
+  /**
+   * Generate INSERT query based on scraping result and database config
+   */
+  private generateInsertQuery(
+    result: ScrapingResult,
+    dbConfig: DatabaseConfig,
+  ): { query: string; values: any[] } {
+    const columns = ["id"];
+    const placeholders = ["?"];
+    const values = [uuidv4()];
+
+    // Add URL if needed
+    if (dbConfig.options?.includeUrl) {
+      columns.push("url");
+      placeholders.push("?");
+      values.push(result.url);
+    }
+
+    // Add timestamp if needed
+    if (dbConfig.options?.includeTimestamp) {
+      columns.push("created_at");
+      placeholders.push("?");
+      values.push(new Date());
+    }
+
+    // Add data for each column
+    for (const [selectorId, columnName] of Object.entries(dbConfig.columns)) {
+      columns.push(columnName);
+      placeholders.push("?");
+      values.push(JSON.stringify(result.data[selectorId] || null));
+    }
+
+    // Add metadata
+    columns.push("metadata");
+    placeholders.push("?");
+    values.push(JSON.stringify(result.metadata || {}));
+
+    const query = `INSERT INTO ${dbConfig.table} (${columns.join(", ")}) VALUES (${placeholders.join(", ")})`;
+
+    return { query, values };
   }
 
   /**
@@ -317,8 +411,8 @@ class ScrapingService {
         format,
       });
       return response.data.filePath;
-    } catch (error: any) {
-      console.error("Error saving scraping results to file:", error);
+    } catch (error) {
+      logger.error("Error saving scraping results to file:", error);
       throw new Error(`Failed to save results to file: ${error.message}`);
     }
   }
@@ -330,8 +424,8 @@ class ScrapingService {
     try {
       const response = await axios.post("/api/scraping/fetch", { url });
       return response.data.html;
-    } catch (error: any) {
-      console.error("Error fetching HTML preview:", error);
+    } catch (error) {
+      logger.error("Error fetching HTML preview:", error);
       throw new Error(`Failed to fetch HTML preview: ${error.message}`);
     }
   }
@@ -349,8 +443,8 @@ class ScrapingService {
         selector,
       });
       return response.data;
-    } catch (error: any) {
-      console.error("Error testing selector:", error);
+    } catch (error) {
+      logger.error("Error testing selector:", error);
       return {
         success: false,
         result: null,
@@ -415,7 +509,7 @@ class ScrapingService {
 
       // Start the scraping process asynchronously
       this.processScraping(jobId, options).catch((error) => {
-        console.error(`Error processing job ${jobId}:`, error);
+        logger.error(`Error processing job ${jobId}:`, error);
         const job = this.activeJobs.get(jobId);
         if (job) {
           job.status = "failed";
@@ -426,7 +520,7 @@ class ScrapingService {
 
       return jobId;
     } catch (error) {
-      console.error("Error starting scraping job:", error);
+      logger.error("Error starting scraping job:", error);
       throw new Error(`Failed to start scraping job: ${error.message}`);
     }
   }
@@ -471,7 +565,7 @@ class ScrapingService {
       job.progress = 100;
       this.activeJobs.set(jobId, job);
     } catch (error) {
-      console.error(`Error processing job ${jobId}:`, error);
+      logger.error(`Error processing job ${jobId}:`, error);
       const job = this.activeJobs.get(jobId);
       if (job) {
         job.status = "failed";
@@ -512,7 +606,7 @@ class ScrapingService {
 
       return response.data;
     } catch (error) {
-      console.error("Error running AI analysis:", error);
+      logger.error("Error running AI analysis:", error);
       throw new Error(`Failed to run AI analysis: ${error.message}`);
     }
   }

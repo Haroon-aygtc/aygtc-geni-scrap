@@ -5,7 +5,7 @@
 
 import { v4 as uuidv4 } from "uuid";
 import logger from "@/utils/logger";
-import { getMySQLClient } from "./mysqlClient";
+import { getMySQLClient, QueryTypes } from "./mysqlClient.js";
 import FollowUpQuestion from "@/models/FollowUpQuestion";
 
 export interface FollowUpQuestionData {
@@ -32,7 +32,7 @@ const followUpQuestionService = {
          ORDER BY display_order ASC`,
         {
           replacements: [configId],
-          type: sequelize.QueryTypes.SELECT,
+          type: QueryTypes.SELECT,
         },
       );
 
@@ -77,7 +77,7 @@ const followUpQuestionService = {
             now,
             now,
           ],
-          type: sequelize.QueryTypes.INSERT,
+          type: QueryTypes.INSERT,
         },
       );
 
@@ -86,7 +86,7 @@ const followUpQuestionService = {
         `SELECT * FROM follow_up_questions WHERE id = ?`,
         {
           replacements: [id],
-          type: sequelize.QueryTypes.SELECT,
+          type: QueryTypes.SELECT,
         },
       );
 
@@ -144,7 +144,7 @@ const followUpQuestionService = {
           `UPDATE follow_up_questions SET ${updateFields.join(", ")} WHERE id = ?`,
           {
             replacements,
-            type: sequelize.QueryTypes.UPDATE,
+            type: QueryTypes.UPDATE,
           },
         );
       }
@@ -154,7 +154,7 @@ const followUpQuestionService = {
         `SELECT * FROM follow_up_questions WHERE id = ?`,
         {
           replacements: [id],
-          type: sequelize.QueryTypes.SELECT,
+          type: QueryTypes.SELECT,
         },
       );
 
@@ -182,7 +182,7 @@ const followUpQuestionService = {
 
       await sequelize.query(`DELETE FROM follow_up_questions WHERE id = ?`, {
         replacements: [id],
-        type: sequelize.QueryTypes.DELETE,
+        type: QueryTypes.DELETE,
       });
 
       return true;
@@ -217,7 +217,7 @@ const followUpQuestionService = {
                 questionIds[i],
                 configId,
               ],
-              type: sequelize.QueryTypes.UPDATE,
+              type: QueryTypes.UPDATE,
               transaction,
             },
           );
@@ -255,7 +255,7 @@ const followUpQuestionService = {
          LIMIT ?`,
         {
           replacements: [configId, limit],
-          type: sequelize.QueryTypes.SELECT,
+          type: QueryTypes.SELECT,
         },
       );
 

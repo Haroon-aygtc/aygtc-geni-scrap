@@ -1,4 +1,4 @@
-import { getMySQLClient } from "./mysqlClient";
+import { getMySQLClient, QueryTypes } from "./mysqlClient.js";
 import { v4 as uuidv4 } from "uuid";
 import logger from "@/utils/logger";
 import { ResponseFormattingConfig, ResponseTemplate } from "@/models";

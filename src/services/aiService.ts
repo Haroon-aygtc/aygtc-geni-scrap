@@ -1,5 +1,5 @@
 import axios from "axios";
-import { getMySQLClient } from "./mysqlClient";
+import { getMySQLClient, QueryTypes } from "./mysqlClient.js";
 import { v4 as uuidv4 } from "uuid";
 import logger from "@/utils/logger";
 import { AIInteractionLog } from "@/models";
@@ -173,7 +173,7 @@ const aiService = {
               data.metadata ? JSON.stringify(data.metadata) : null,
               new Date(),
             ],
-            type: sequelize.QueryTypes.INSERT,
+            type: QueryTypes.INSERT,
           },
         );
 
