@@ -9,6 +9,7 @@
 import axios, { AxiosRequestConfig, AxiosResponse, AxiosError } from "axios";
 import { env } from "@/config/env";
 import logger from "@/utils/logger";
+import { getAuthToken, isTokenExpired } from "@/utils/auth";
 
 // Standard API response format
 export interface ApiResponse<T = any> {
@@ -42,7 +43,10 @@ export interface ApiRequestOptions extends AxiosRequestConfig {
 
 // Cache implementation with size limit and LRU eviction
 class LRUCache {
-  private cache = new Map<string, { data: any; timestamp: number; lastAccessed: number }>();
+  private cache = new Map<
+    string,
+    { data: any; timestamp: number; lastAccessed: number }
+  >();
   private maxSize: number;
 
   constructor(maxSize = 100) {
@@ -91,6 +95,14 @@ class LRUCache {
   clear(): void {
     this.cache.clear();
   }
+
+  clearPattern(pattern: string): void {
+    for (const key of this.cache.keys()) {
+      if (key.includes(pattern)) {
+        this.cache.delete(key);
+      }
+    }
+  }
 }
 
 // Initialize cache with a reasonable size limit
@@ -100,9 +112,13 @@ const cache = new LRUCache(200);
 const generateRequestId = (): string => {
   const randomValues = new Uint32Array(2);
   window.crypto.getRandomValues(randomValues);
-  return Date.now().toString(36) + "-" + 
-         randomValues[0].toString(36) + "-" + 
-         randomValues[1].toString(36);
+  return (
+    Date.now().toString(36) +
+    "-" +
+    randomValues[0].toString(36) +
+    "-" +
+    randomValues[1].toString(36)
+  );
 };
 
 // Create axios instance with base URL and sensible defaults
@@ -110,7 +126,7 @@ const apiClient = axios.create({
   baseURL: env.API_BASE_URL || "/api",
   headers: {
     "Content-Type": "application/json",
-    "Accept": "application/json",
+    Accept: "application/json",
   },
   timeout: 30000, // 30 seconds
   withCredentials: true, // Include cookies in cross-origin requests if needed
@@ -120,18 +136,32 @@ const apiClient = axios.create({
 apiClient.interceptors.request.use(
   (config) => {
     // Get token from localStorage
-    const token = localStorage.getItem("authToken");
+    const token = getAuthToken();
     if (token && !config.headers.Authorization) {
-      config.headers.Authorization = `Bearer ${token}`;
+      // Check if token is expired
+      if (isTokenExpired(token)) {
+        // Token is expired, redirect to login
+        // This could also trigger a token refresh flow instead
+        localStorage.removeItem("authToken");
+        if (!window.location.pathname.startsWith("/auth/")) {
+          window.location.href =
+            "/auth/login?redirect=" +
+            encodeURIComponent(window.location.pathname);
+        }
+      } else {
+        config.headers.Authorization = `Bearer ${token}`;
+      }
     }
 
     // Add request ID for tracing
     const requestId = generateRequestId();
     config.headers["X-Request-ID"] = requestId;
-    
+
     // Add CSRF protection for non-GET requests
-    if (config.method !== 'get') {
-      const csrfToken = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content');
+    if (config.method !== "get") {
+      const csrfToken = document
+        .querySelector('meta[name="csrf-token"]')
+        ?.getAttribute("content");
       if (csrfToken) {
         config.headers["X-CSRF-Token"] = csrfToken;
       }
@@ -171,14 +201,18 @@ apiClient.interceptors.response.use(
       // Clear token and redirect to login
       localStorage.removeItem("authToken");
       // Use a more controlled approach to redirect
-      if (!window.location.pathname.startsWith('/auth/')) {
-        window.location.href = "/auth/login?redirect=" + encodeURIComponent(window.location.pathname);
+      if (!window.location.pathname.startsWith("/auth/")) {
+        window.location.href =
+          "/auth/login?redirect=" +
+          encodeURIComponent(window.location.pathname);
       }
     }
-    
+
     // Handle CSRF token errors
-    if (error.response?.status === 403 && 
-        error.response?.data?.error?.code === "INVALID_CSRF_TOKEN") {
+    if (
+      error.response?.status === 403 &&
+      error.response?.data?.error?.code === "INVALID_CSRF_TOKEN"
+    ) {
       // Refresh the page to get a new CSRF token
       window.location.reload();
       return Promise.reject(error);
@@ -221,7 +255,7 @@ apiClient.interceptors.response.use(
 /**
  * Sleep function for implementing retry delays
  */
-const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
  * Make an API request with standardized handling
@@ -308,26 +342,28 @@ export async function apiRequest<T = any>(
       return response.data;
     } catch (error) {
       lastError = error;
-      
+
       // Don't retry for certain error types
       const status = error.response?.status;
-      const shouldRetry = 
+      const shouldRetry =
         // Only retry on network errors or 5xx server errors
-        (!status || status >= 500) && 
+        (!status || status >= 500) &&
         // Don't retry on 401 (unauthorized) or 403 (forbidden)
-        status !== 401 && 
+        status !== 401 &&
         status !== 403 &&
         // Only retry if we haven't exceeded max retries
         retryCount < retries;
-      
+
       if (shouldRetry) {
         retryCount++;
         const delay = retryDelay * Math.pow(2, retryCount - 1); // Exponential backoff
-        logger.warn(`Retrying API request (${retryCount}/${retries}) after ${delay}ms: ${method} ${url}`);
+        logger.warn(
+          `Retrying API request (${retryCount}/${retries}) after ${delay}ms: ${method} ${url}`,
+        );
         await sleep(delay);
         continue;
       }
-      
+
       break;
     }
   }
@@ -379,6 +415,12 @@ export const api = {
     const cacheKey = `${method}:${url}:${JSON.stringify(params)}:${JSON.stringify(data)}`;
     cache.delete(cacheKey);
   },
-  
+
   // Clear cache entries matching a pattern
   clearCachePattern: (pattern: string) => {
+    cache.clearPattern(pattern);
+  },
+
+  // Get the base URL for the API
+  getBaseUrl: () => apiClient.defaults.baseURL,
+};

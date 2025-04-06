@@ -305,4 +305,6 @@ const chatService = {
   },
 };
 
+// Add named export for chatService
+export { chatService };
 export default chatService;

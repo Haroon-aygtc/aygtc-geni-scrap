@@ -1,148 +1,32 @@
 /**
  * AI Service API Endpoints
+ *
+ * Defines the API endpoints for AI operations
  */
 
-import { api, ApiResponse } from "../middleware/apiMiddleware";
-
-export interface GenerateResponseRequest {
-  query: string;
-  contextRuleId?: string;
-  promptTemplateId?: string;
-  userId: string;
-  knowledgeBaseIds?: string[];
-  preferredModel?: string;
-  systemPrompt?: string;
-  maxTokens?: number;
-  temperature?: number;
-  additionalParams?: Record<string, any>;
-}
-
-export interface AIModelResponse {
-  content: string;
-  modelUsed: string;
-  metadata?: Record<string, any>;
-  knowledgeBaseResults?: number;
-  knowledgeBaseIds?: string[];
-}
-
-export interface AIInteractionLogParams {
-  page?: number;
-  pageSize?: number;
-  userId?: string;
-  modelUsed?: string;
-  contextRuleId?: string | null;
-  startDate?: string;
-  endDate?: string;
-  query?: string;
-}
-
-export interface AIInteractionLog {
-  id: string;
-  user_id: string;
-  query: string;
-  response: string;
-  model_used: string;
-  context_rule_id?: string;
-  context_rule?: {
-    name: string;
-  };
-  knowledge_base_results?: number;
-  knowledge_base_ids?: string[];
-  metadata?: Record<string, any>;
-  created_at: string;
-}
-
-export interface AIInteractionLogsResponse {
-  logs: AIInteractionLog[];
-  totalPages: number;
-  currentPage: number;
-  totalItems: number;
-}
-
-export interface LogInteractionRequest {
-  userId: string;
-  query: string;
-  response: string;
-  modelUsed: string;
-  contextRuleId?: string;
-  knowledgeBaseResults?: number;
-  knowledgeBaseIds?: string[];
-  metadata?: Record<string, any>;
-}
-
-export interface AIPerformanceMetrics {
-  modelUsage: Array<{ model_used: string; count: number }>;
-  avgResponseTimes: Array<{ model_used: string; avg_time: number }>;
-  dailyUsage: Array<{ date: string; count: number }>;
-  timeRange: string;
-}
-
-export interface AIModelInfo {
-  id: string;
-  name: string;
-  provider: string;
-  isAvailable?: boolean;
-}
-
 export const aiEndpoints = {
-  /**
-   * Generate a response using the appropriate AI model
-   */
-  generateResponse: async (
-    data: GenerateResponseRequest,
-  ): Promise<ApiResponse<AIModelResponse>> => {
-    return api.post<AIModelResponse>("/ai/generate", data);
-  },
+  // Core AI functionality
+  generate: "/ai/generate",
+  streamGenerate: "/ai/generate/stream",
 
-  /**
-   * Get AI interaction logs for admin dashboard
-   */
-  getInteractionLogs: async (
-    params: AIInteractionLogParams = {},
-  ): Promise<ApiResponse<AIInteractionLogsResponse>> => {
-    return api.get<AIInteractionLogsResponse>("/ai/logs", { params });
-  },
+  // Model management
+  models: "/ai/models",
+  modelById: (id: string) => `/ai/models/${id}`,
+  defaultModel: "/ai/models/default",
 
-  /**
-   * Log an AI interaction
-   */
-  logInteraction: async (
-    data: LogInteractionRequest,
-  ): Promise<ApiResponse<{ id: string }>> => {
-    return api.post<{ id: string }>("/ai/logs", data);
-  },
+  // Logging and analytics
+  logs: "/ai/logs",
+  logById: (id: string) => `/ai/logs/${id}`,
+  performance: "/ai/performance",
 
-  /**
-   * Get AI model performance metrics
-   */
-  getModelPerformance: async (
-    timeRange: string = "7d",
-  ): Promise<ApiResponse<AIPerformanceMetrics>> => {
-    return api.get<AIPerformanceMetrics>("/ai/performance", {
-      params: { timeRange },
-    });
-  },
+  // Cache management
+  cache: "/ai/cache",
+  cacheItem: (id: string) => `/ai/cache/${id}`,
+  clearCache: "/ai/cache/clear",
 
-  /**
-   * Get available AI models
-   */
-  getAvailableModels: async (): Promise<ApiResponse<AIModelInfo[]>> => {
-    return api.get<AIModelInfo[]>("/ai/models");
-  },
-
-  /**
-   * Set the default AI model
-   */
-  setDefaultModel: async (
-    modelId: string,
-  ): Promise<ApiResponse<{ success: boolean }>> => {
-    return api.post<{ success: boolean }>("/ai/models/default", { modelId });
-  },
-
-  /**
-   * Get the default AI model
-   */
-  getDefaultModel: async (): Promise<ApiResponse<AIModelInfo>> => {
-    return api.get<AIModelInfo>("/ai/models/default");
-  },
+  // Prompt management
+  prompts: "/ai/prompts",
+  promptById: (id: string) => `/ai/prompts/${id}`,
+  promptTemplates: "/ai/prompt-templates",
+  promptTemplateById: (id: string) => `/ai/prompt-templates/${id}`,
 };

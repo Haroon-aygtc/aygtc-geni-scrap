@@ -5,8 +5,9 @@
  * It handles connection pooling and reconnection automatically.
  */
 
+// Import Sequelize using named imports instead of default import
 import { Sequelize, DataTypes, QueryTypes } from "sequelize";
-import dbConfig from "@/config/database.js";
+import dbConfig from "../config/database.js";
 
 let sequelizeInstance = null;
 
@@ -20,22 +21,30 @@ export const getMySQLClient = async () => {
   }
 
   try {
-    sequelizeInstance = new Sequelize({
-      database: dbConfig.database,
-      username: dbConfig.username,
-      password: dbConfig.password,
-      host: dbConfig.host,
-      port: dbConfig.port,
-      dialect: "mysql",
-      logging: dbConfig.logging,
-      pool: dbConfig.pool,
-      define: {
-        timestamps: true,
-        underscored: true,
-        createdAt: "created_at",
-        updatedAt: "updated_at",
+    // Get the current environment
+    const env = process.env.NODE_ENV || "development";
+    const config = dbConfig[env];
+
+    // Create a new Sequelize instance
+    sequelizeInstance = new Sequelize(
+      config.database,
+      config.username,
+      config.password,
+      {
+        host: config.host,
+        port: config.port,
+        dialect: "mysql",
+        logging: config.logging,
+        pool: config.pool,
+        dialectOptions: config.dialectOptions,
+        define: {
+          timestamps: true,
+          underscored: true,
+          createdAt: "created_at",
+          updatedAt: "updated_at",
+        },
       },
-    });
+    );
 
     // Test the connection
     await sequelizeInstance.authenticate();

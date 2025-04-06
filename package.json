@@ -87,7 +87,7 @@
     "react-router": "^6.23.1",
     "react-router-dom": "^6.23.1",
     "recharts": "^2.15.1",
-    "sequelize": "^6.37.6",
+    "sequelize": "^6.37.7",
     "sequelize-cli": "^6.6.2",
     "tailwind-merge": "^2.3.0",
     "tailwindcss-animate": "^1.0.7",
