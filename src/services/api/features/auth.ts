@@ -28,6 +28,8 @@ export interface User {
   metadata?: Record<string, any>;
   createdAt: string;
   updatedAt: string;
+  emailVerified?: boolean;
+  lastLoginAt?: string;
 }
 
 export interface AuthResponse {
@@ -43,6 +45,16 @@ export interface PasswordResetRequest {
 export interface PasswordUpdateData {
   currentPassword?: string;
   newPassword: string;
+}
+
+export interface UserSession {
+  id: string;
+  userId: string;
+  ipAddress?: string;
+  userAgent?: string;
+  lastActiveAt: string;
+  createdAt: string;
+  isCurrentSession?: boolean;
 }
 
 export const authApi = {
@@ -88,6 +100,13 @@ export const authApi = {
    */
   getCurrentUser: async (): Promise<ApiResponse<User>> => {
     return api.get<User>("/auth/me");
+  },
+
+  /**
+   * Update the current user's profile
+   */
+  updateProfile: async (data: Partial<User>): Promise<ApiResponse<User>> => {
+    return api.put<User>("/auth/profile", data);
   },
 
   /**
@@ -143,8 +162,8 @@ export const authApi = {
   /**
    * Get all active sessions for the current user
    */
-  getSessions: async (): Promise<ApiResponse<any[]>> => {
-    return api.get<any[]>("/auth/sessions");
+  getSessions: async (): Promise<ApiResponse<UserSession[]>> => {
+    return api.get<UserSession[]>("/auth/sessions");
   },
 
   /**
@@ -152,5 +171,41 @@ export const authApi = {
    */
   revokeSession: async (sessionId: string): Promise<ApiResponse<void>> => {
     return api.post<void>(`/auth/sessions/${sessionId}/revoke`);
+  },
+
+  /**
+   * Check if user has a specific role
+   */
+  hasRole: async (role: string): Promise<ApiResponse<boolean>> => {
+    return api.get<boolean>(`/auth/has-role/${role}`);
+  },
+
+  /**
+   * Change a user's role (admin only)
+   */
+  changeUserRole: async (
+    userId: string,
+    role: string,
+  ): Promise<ApiResponse<User>> => {
+    return api.put<User>(`/auth/users/${userId}/role`, { role });
+  },
+
+  /**
+   * Get user by ID (admin only)
+   */
+  getUserById: async (userId: string): Promise<ApiResponse<User>> => {
+    return api.get<User>(`/auth/users/${userId}`);
+  },
+
+  /**
+   * Get all users (admin only)
+   */
+  getAllUsers: async (
+    page: number = 1,
+    limit: number = 20,
+  ): Promise<ApiResponse<{ users: User[]; total: number }>> => {
+    return api.get<{ users: User[]; total: number }>(`/auth/users`, {
+      params: { page, limit },
+    });
   },
 };

@@ -4,6 +4,8 @@ import { v4 as uuidv4 } from "uuid";
 import { User, getSafeUser } from "@/models/User";
 import logger from "@/utils/logger";
 import { env } from "@/config/env";
+import { getMySQLClient, QueryTypes } from "./mysqlClient";
+import { api } from "./api/middleware/apiMiddleware";
 
 // JWT configuration
 const JWT_SECRET = env.JWT_SECRET || "your-secret-key-should-be-set-in-env";
@@ -44,9 +46,18 @@ const authService = {
     }
 
     try {
+      const db = await getMySQLClient();
+
       // Check if user already exists
-      const existingUser = await User.findOne({ where: { email } });
-      if (existingUser) {
+      const existingUsers = await db.query(
+        "SELECT * FROM users WHERE email = ?",
+        {
+          replacements: [email],
+          type: QueryTypes.SELECT,
+        },
+      );
+
+      if (existingUsers.length > 0) {
         throw new Error("User with this email already exists");
       }
 
@@ -55,29 +66,47 @@ const authService = {
       const hashedPassword = await bcrypt.hash(password, salt);
 
       // Generate verification token
+      const userId = uuidv4();
       const verificationToken = uuidv4();
       const verificationExpires = new Date();
       verificationExpires.setHours(verificationExpires.getHours() + 24); // Token valid for 24 hours
+      const now = new Date();
 
-      // Create user
-      const user = await User.create({
-        id: uuidv4(),
-        email,
-        full_name: name || email.split("@")[0],
-        password_hash: hashedPassword,
-        role: "user",
-        is_active: true,
-        email_verified: false,
-        verification_token: verificationToken,
-        verification_token_expires: verificationExpires,
-        created_at: new Date(),
-        updated_at: new Date(),
-      });
+      // Create user with direct SQL query
+      await db.query(
+        "INSERT INTO users (id, email, full_name, password_hash, role, is_active, email_verified, verification_token, verification_token_expires, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        {
+          replacements: [
+            userId,
+            email,
+            name || email.split("@")[0],
+            hashedPassword,
+            "user",
+            true,
+            false,
+            verificationToken,
+            verificationExpires,
+            now,
+            now,
+          ],
+          type: QueryTypes.INSERT,
+        },
+      );
 
       // In a production environment, send verification email here
       logger.info(`Verification token for ${email}: ${verificationToken}`);
 
-      return getSafeUser(user);
+      // Fetch the created user
+      const users = await db.query("SELECT * FROM users WHERE id = ?", {
+        replacements: [userId],
+        type: QueryTypes.SELECT,
+      });
+
+      if (users.length === 0) {
+        throw new Error("Failed to create user");
+      }
+
+      return getSafeUser(users[0]);
     } catch (error) {
       logger.error(
         "Error registering user",
@@ -98,30 +127,38 @@ const authService = {
     }
 
     try {
-      // Find user with this verification token
-      const user = await User.findOne({
-        where: {
-          verification_token: token,
-        },
-      });
+      const db = await getMySQLClient();
 
-      if (!user) {
+      // Find user with this verification token
+      const users = await db.query(
+        "SELECT * FROM users WHERE verification_token = ?",
+        {
+          replacements: [token],
+          type: QueryTypes.SELECT,
+        },
+      );
+
+      if (users.length === 0) {
         throw new Error("Invalid verification token");
       }
 
+      const user = users[0];
+
       // Check if token is expired
       const tokenExpires = user.verification_token_expires;
-      if (!tokenExpires || tokenExpires < new Date()) {
+      if (!tokenExpires || new Date(tokenExpires) < new Date()) {
         throw new Error("Verification token has expired");
       }
 
       // Update user as verified
-      await user.update({
-        email_verified: true,
-        verification_token: null,
-        verification_token_expires: null,
-        updated_at: new Date(),
-      });
+      const now = new Date();
+      await db.query(
+        "UPDATE users SET email_verified = ?, verification_token = NULL, verification_token_expires = NULL, updated_at = ? WHERE id = ?",
+        {
+          replacements: [true, now, user.id],
+          type: QueryTypes.UPDATE,
+        },
+      );
 
       return { success: true };
     } catch (error) {
@@ -145,11 +182,19 @@ const authService = {
     }
 
     try {
+      const db = await getMySQLClient();
+
       // Find user
-      const user = await User.findOne({ where: { email } });
-      if (!user) {
+      const users = await db.query("SELECT * FROM users WHERE email = ?", {
+        replacements: [email],
+        type: QueryTypes.SELECT,
+      });
+
+      if (users.length === 0) {
         throw new Error("Invalid credentials");
       }
+
+      const user = users[0];
 
       // Check if user is active
       if (!user.is_active) {
@@ -157,9 +202,12 @@ const authService = {
       }
 
       // Check if account is locked
-      if (user.account_locked_until && user.account_locked_until > new Date()) {
+      if (
+        user.account_locked_until &&
+        new Date(user.account_locked_until) > new Date()
+      ) {
         const remainingTime = Math.ceil(
-          (user.account_locked_until.getTime() - Date.now()) / 60000,
+          (new Date(user.account_locked_until).getTime() - Date.now()) / 60000,
         );
         throw new Error(
           `Account is temporarily locked. Try again in ${remainingTime} minutes`,
@@ -172,31 +220,45 @@ const authService = {
       if (!isMatch) {
         // Increment failed login attempts
         const failedAttempts = (user.failed_login_attempts || 0) + 1;
-        const updates: any = {
-          failed_login_attempts: failedAttempts,
-          updated_at: new Date(),
-        };
+        const now = new Date();
 
         // Lock account if max attempts reached
         if (failedAttempts >= MAX_LOGIN_ATTEMPTS) {
           const lockUntil = new Date(Date.now() + ACCOUNT_LOCK_TIME);
-          updates.account_locked_until = lockUntil;
+
+          await db.query(
+            "UPDATE users SET failed_login_attempts = ?, account_locked_until = ?, updated_at = ? WHERE id = ?",
+            {
+              replacements: [failedAttempts, lockUntil, now, user.id],
+              type: QueryTypes.UPDATE,
+            },
+          );
+
           logger.warn(
             `Account locked for ${email} due to too many failed login attempts`,
           );
+        } else {
+          await db.query(
+            "UPDATE users SET failed_login_attempts = ?, updated_at = ? WHERE id = ?",
+            {
+              replacements: [failedAttempts, now, user.id],
+              type: QueryTypes.UPDATE,
+            },
+          );
         }
 
-        await user.update(updates);
         throw new Error("Invalid credentials");
       }
 
       // Reset failed login attempts and update last login time
-      await user.update({
-        failed_login_attempts: 0,
-        account_locked_until: null,
-        last_login_at: new Date(),
-        updated_at: new Date(),
-      });
+      const now = new Date();
+      await db.query(
+        "UPDATE users SET failed_login_attempts = 0, account_locked_until = NULL, last_login_at = ?, updated_at = ? WHERE id = ?",
+        {
+          replacements: [now, now, user.id],
+          type: QueryTypes.UPDATE,
+        },
+      );
 
       // Generate JWT token with appropriate claims
       const tokenPayload = {
@@ -254,12 +316,18 @@ const authService = {
     }
 
     try {
-      const user = await User.findByPk(userId);
-      if (!user) {
+      const db = await getMySQLClient();
+
+      const users = await db.query("SELECT * FROM users WHERE id = ?", {
+        replacements: [userId],
+        type: QueryTypes.SELECT,
+      });
+
+      if (users.length === 0) {
         return null;
       }
 
-      return getSafeUser(user);
+      return getSafeUser(users[0]);
     } catch (error) {
       logger.error(
         "Error getting current user",
@@ -310,23 +378,35 @@ const authService = {
     }
 
     try {
-      const user = await User.findOne({ where: { email } });
-      if (!user) {
+      const db = await getMySQLClient();
+
+      // Find user with this email
+      const users = await db.query("SELECT * FROM users WHERE email = ?", {
+        replacements: [email],
+        type: QueryTypes.SELECT,
+      });
+
+      if (users.length === 0) {
         // Don't reveal that the user doesn't exist
         return { success: true };
       }
+
+      const user = users[0];
 
       // Generate secure reset token
       const resetToken = uuidv4();
       const resetExpires = new Date();
       resetExpires.setHours(resetExpires.getHours() + 1); // Token valid for 1 hour
+      const now = new Date();
 
       // Update user with reset token
-      await user.update({
-        reset_token: resetToken,
-        reset_token_expires: resetExpires,
-        updated_at: new Date(),
-      });
+      await db.query(
+        "UPDATE users SET reset_token = ?, reset_token_expires = ?, updated_at = ? WHERE id = ?",
+        {
+          replacements: [resetToken, resetExpires, now, user.id],
+          type: QueryTypes.UPDATE,
+        },
+      );
 
       // In a production environment, send an email with the reset link
       logger.info(`Password reset token for ${email}: ${resetToken}`);
@@ -360,36 +440,15 @@ const authService = {
     }
 
     try {
-      // Find user with this reset token
-      const user = await User.findOne({
-        where: {
-          reset_token: token,
-        },
+      // Use the API to reset the password
+      const response = await api.post<void>("/auth/reset-password", {
+        token,
+        password: newPassword,
       });
 
-      if (!user) {
-        throw new Error("Invalid or expired reset token");
+      if (!response.success) {
+        throw new Error(response.error?.message || "Failed to reset password");
       }
-
-      // Check if token is expired
-      const resetExpires = user.reset_token_expires;
-      if (!resetExpires || resetExpires < new Date()) {
-        throw new Error("Reset token has expired");
-      }
-
-      // Hash new password with appropriate cost factor
-      const salt = await bcrypt.genSalt(12);
-      const hashedPassword = await bcrypt.hash(newPassword, salt);
-
-      // Update user with new password and remove reset token
-      await user.update({
-        password_hash: hashedPassword,
-        reset_token: null,
-        reset_token_expires: null,
-        failed_login_attempts: 0,
-        account_locked_until: null,
-        updated_at: new Date(),
-      });
 
       return { success: true };
     } catch (error) {
@@ -437,68 +496,31 @@ const authService = {
     }
 
     try {
-      const user = await User.findByPk(userId);
-      if (!user) {
-        throw new Error("User not found");
-      }
-
-      // Handle password update separately with validation
+      // Validate password if being updated
       if (updates.password) {
         if (updates.password.length < PASSWORD_MIN_LENGTH) {
           throw new Error(
             `Password must be at least ${PASSWORD_MIN_LENGTH} characters long`,
           );
         }
-
-        const salt = await bcrypt.genSalt(12);
-        const hashedPassword = await bcrypt.hash(updates.password, salt);
-        updates.password_hash = hashedPassword;
-        delete updates.password;
       }
 
       // Validate email if being updated
-      if (updates.email && updates.email !== user.email) {
+      if (updates.email) {
         const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
         if (!emailRegex.test(updates.email)) {
           throw new Error("Invalid email format");
         }
-
-        // Check if email is already in use
-        const existingUser = await User.findOne({
-          where: { email: updates.email },
-        });
-        if (existingUser) {
-          throw new Error("Email is already in use");
-        }
-
-        // Generate new verification token for email change
-        const verificationToken = uuidv4();
-        const verificationExpires = new Date();
-        verificationExpires.setHours(verificationExpires.getHours() + 24);
-
-        updates.email_verified = false;
-        updates.verification_token = verificationToken;
-        updates.verification_token_expires = verificationExpires;
-
-        // In a production environment, send verification email here
-        logger.info(
-          `Email change verification token for ${updates.email}: ${verificationToken}`,
-        );
       }
 
-      // Add updated_at timestamp
-      updates.updated_at = new Date();
+      // Use the API to update the profile
+      const response = await api.put<User>("/auth/profile", updates);
 
-      // Update user
-      await user.update(updates);
-
-      // Refresh user from database
-      const updatedUser = await User.findByPk(userId);
-      if (!updatedUser) {
-        throw new Error("Failed to retrieve updated user");
+      if (!response.success) {
+        throw new Error(response.error?.message || "Failed to update profile");
       }
 
-      return getSafeUser(updatedUser);
+      return response.data;
     } catch (error) {
       logger.error(
         `Error updating user ${userId}`,
@@ -520,8 +542,15 @@ const authService = {
     }
 
     try {
-      const user = await User.findByPk(userId);
-      return user?.role === role;
+      // Use the API to check if the user has the role
+      const response = await api.get<boolean>(`/auth/has-role/${role}`);
+
+      if (!response.success) {
+        logger.error(`Error checking role: ${response.error?.message}`);
+        return false;
+      }
+
+      return response.data || false;
     } catch (error) {
       logger.error(
         `Error checking role for user ${userId}`,
@@ -556,21 +585,22 @@ const authService = {
         throw new Error("Only administrators can change user roles");
       }
 
-      const user = await User.findByPk(userId);
-      if (!user) {
-        throw new Error("User not found");
-      }
-
-      await user.update({
+      // Use the API to change the user role
+      const response = await api.put<User>(`/auth/users/${userId}/role`, {
         role: newRole,
-        updated_at: new Date(),
       });
+
+      if (!response.success) {
+        throw new Error(
+          response.error?.message || "Failed to change user role",
+        );
+      }
 
       logger.info(
         `User ${userId} role changed to ${newRole} by admin ${adminId}`,
       );
 
-      return getSafeUser(user);
+      return response.data;
     } catch (error) {
       logger.error(
         `Error changing role for user ${userId}`,

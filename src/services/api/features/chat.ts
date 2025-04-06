@@ -67,6 +67,16 @@ export interface MessageQueryParams {
   before?: string;
 }
 
+export interface ChatAnalytics {
+  totalSessions: number;
+  activeSessions: number;
+  totalMessages: number;
+  averageMessagesPerSession: number;
+  messagesByType: Record<string, number>;
+  sessionsOverTime: Array<{ date: string; count: number }>;
+  messagesOverTime: Array<{ date: string; count: number }>;
+}
+
 export const chatApi = {
   /**
    * Get all chat sessions
@@ -143,6 +153,23 @@ export const chatApi = {
   },
 
   /**
+   * Update a message
+   */
+  updateMessage: async (
+    id: string,
+    data: Partial<ChatMessage>,
+  ): Promise<ApiResponse<ChatMessage>> => {
+    return api.put<ChatMessage>(`/chat/messages/${id}`, data);
+  },
+
+  /**
+   * Delete a message
+   */
+  deleteMessage: async (id: string): Promise<ApiResponse<boolean>> => {
+    return api.delete<boolean>(`/chat/messages/${id}`);
+  },
+
+  /**
    * Mark messages as read
    */
   markMessagesAsRead: async (
@@ -205,6 +232,24 @@ export const chatApi = {
   },
 
   /**
+   * Get attachments for a message
+   */
+  getMessageAttachments: async (
+    messageId: string,
+  ): Promise<ApiResponse<ChatAttachment[]>> => {
+    return api.get<ChatAttachment[]>(`/chat/messages/${messageId}/attachments`);
+  },
+
+  /**
+   * Delete an attachment
+   */
+  deleteAttachment: async (
+    attachmentId: string,
+  ): Promise<ApiResponse<boolean>> => {
+    return api.delete<boolean>(`/chat/attachments/${attachmentId}`);
+  },
+
+  /**
    * Archive a chat session
    */
   archiveSession: async (id: string): Promise<ApiResponse<ChatSession>> => {
@@ -228,7 +273,39 @@ export const chatApi = {
   /**
    * Get chat analytics
    */
-  getAnalytics: async (timeRange: string = "7d"): Promise<ApiResponse<any>> => {
-    return api.get<any>("/chat/analytics", { params: { timeRange } });
+  getAnalytics: async (
+    timeRange: string = "7d",
+  ): Promise<ApiResponse<ChatAnalytics>> => {
+    return api.get<ChatAnalytics>("/chat/analytics", { params: { timeRange } });
+  },
+
+  /**
+   * Export chat session history
+   */
+  exportSessionHistory: async (
+    sessionId: string,
+    format: "json" | "csv" | "pdf" = "json",
+  ): Promise<ApiResponse<Blob>> => {
+    return api.get<Blob>(`/chat/sessions/${sessionId}/export`, {
+      params: { format },
+      responseType: "blob",
+    });
+  },
+
+  /**
+   * Get recent chat activity
+   */
+  getRecentActivity: async (
+    limit: number = 10,
+  ): Promise<
+    ApiResponse<{
+      recentSessions: ChatSession[];
+      recentMessages: ChatMessage[];
+    }>
+  > => {
+    return api.get<{
+      recentSessions: ChatSession[];
+      recentMessages: ChatMessage[];
+    }>("/chat/recent-activity", { params: { limit } });
   },
 };
