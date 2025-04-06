@@ -1,12 +1,12 @@
 /**
  * Follow-up Question Service
- * Handles CRUD operations for follow-up questions
+ *
+ * This service handles interactions with follow-up questions using the API layer
+ * instead of direct database access.
  */
 
-import { v4 as uuidv4 } from "uuid";
 import logger from "@/utils/logger";
-import { getMySQLClient, QueryTypes } from "./mysqlClient.js";
-import FollowUpQuestion from "@/models/FollowUpQuestion";
+import { api } from "./api/middleware/apiMiddleware";
 
 export interface FollowUpQuestionData {
   id?: string;
@@ -24,25 +24,17 @@ const followUpQuestionService = {
     configId: string,
   ): Promise<FollowUpQuestionData[]> => {
     try {
-      const sequelize = await getMySQLClient();
-
-      const questions = await sequelize.query(
-        `SELECT * FROM follow_up_questions 
-         WHERE config_id = ? 
-         ORDER BY display_order ASC`,
-        {
-          replacements: [configId],
-          type: QueryTypes.SELECT,
-        },
+      const response = await api.get<FollowUpQuestionData[]>(
+        `/follow-up-configs/${configId}/questions`,
       );
 
-      return questions.map((q: any) => ({
-        id: q.id,
-        configId: q.config_id,
-        question: q.question,
-        displayOrder: q.display_order,
-        isActive: q.is_active,
-      }));
+      if (!response.success) {
+        throw new Error(
+          response.error?.message || "Failed to fetch follow-up questions",
+        );
+      }
+
+      return response.data || [];
     } catch (error) {
       logger.error(
         `Error fetching follow-up questions for config ${configId}`,
@@ -59,46 +51,18 @@ const followUpQuestionService = {
     data: FollowUpQuestionData,
   ): Promise<FollowUpQuestionData | null> => {
     try {
-      const sequelize = await getMySQLClient();
-      const id = data.id || uuidv4();
-      const now = new Date().toISOString();
-
-      await sequelize.query(
-        `INSERT INTO follow_up_questions 
-         (id, config_id, question, display_order, is_active, created_at, updated_at) 
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        {
-          replacements: [
-            id,
-            data.configId,
-            data.question,
-            data.displayOrder || 0,
-            data.isActive !== undefined ? data.isActive : true,
-            now,
-            now,
-          ],
-          type: QueryTypes.INSERT,
-        },
+      const response = await api.post<FollowUpQuestionData>(
+        "/follow-up-questions",
+        data,
       );
 
-      // Fetch the created question
-      const [question] = await sequelize.query(
-        `SELECT * FROM follow_up_questions WHERE id = ?`,
-        {
-          replacements: [id],
-          type: QueryTypes.SELECT,
-        },
-      );
+      if (!response.success || !response.data) {
+        throw new Error(
+          response.error?.message || "Failed to create follow-up question",
+        );
+      }
 
-      if (!question) return null;
-
-      return {
-        id: question.id,
-        configId: question.config_id,
-        question: question.question,
-        displayOrder: question.display_order,
-        isActive: question.is_active,
-      };
+      return response.data;
     } catch (error) {
       logger.error("Error creating follow-up question", error);
       return null;
@@ -113,60 +77,18 @@ const followUpQuestionService = {
     data: Partial<FollowUpQuestionData>,
   ): Promise<FollowUpQuestionData | null> => {
     try {
-      const sequelize = await getMySQLClient();
-      const updateFields = [];
-      const replacements = [];
+      const response = await api.put<FollowUpQuestionData>(
+        `/follow-up-questions/${id}`,
+        data,
+      );
 
-      if (data.question !== undefined) {
-        updateFields.push("question = ?");
-        replacements.push(data.question);
-      }
-
-      if (data.displayOrder !== undefined) {
-        updateFields.push("display_order = ?");
-        replacements.push(data.displayOrder);
-      }
-
-      if (data.isActive !== undefined) {
-        updateFields.push("is_active = ?");
-        replacements.push(data.isActive);
-      }
-
-      // Always update the updated_at timestamp
-      updateFields.push("updated_at = ?");
-      replacements.push(new Date().toISOString());
-
-      // Add the ID to the replacements
-      replacements.push(id);
-
-      if (updateFields.length > 0) {
-        await sequelize.query(
-          `UPDATE follow_up_questions SET ${updateFields.join(", ")} WHERE id = ?`,
-          {
-            replacements,
-            type: QueryTypes.UPDATE,
-          },
+      if (!response.success || !response.data) {
+        throw new Error(
+          response.error?.message || "Failed to update follow-up question",
         );
       }
 
-      // Fetch the updated question
-      const [question] = await sequelize.query(
-        `SELECT * FROM follow_up_questions WHERE id = ?`,
-        {
-          replacements: [id],
-          type: QueryTypes.SELECT,
-        },
-      );
-
-      if (!question) return null;
-
-      return {
-        id: question.id,
-        configId: question.config_id,
-        question: question.question,
-        displayOrder: question.display_order,
-        isActive: question.is_active,
-      };
+      return response.data;
     } catch (error) {
       logger.error(`Error updating follow-up question ${id}`, error);
       return null;
@@ -178,12 +100,15 @@ const followUpQuestionService = {
    */
   deleteQuestion: async (id: string): Promise<boolean> => {
     try {
-      const sequelize = await getMySQLClient();
+      const response = await api.delete<{ success: boolean }>(
+        `/follow-up-questions/${id}`,
+      );
 
-      await sequelize.query(`DELETE FROM follow_up_questions WHERE id = ?`, {
-        replacements: [id],
-        type: QueryTypes.DELETE,
-      });
+      if (!response.success) {
+        throw new Error(
+          response.error?.message || "Failed to delete follow-up question",
+        );
+      }
 
       return true;
     } catch (error) {
@@ -200,35 +125,20 @@ const followUpQuestionService = {
     questionIds: string[],
   ): Promise<boolean> => {
     try {
-      const sequelize = await getMySQLClient();
-      const transaction = await sequelize.transaction();
+      const response = await api.put<{ success: boolean }>(
+        `/follow-up-configs/${configId}/questions/reorder`,
+        {
+          questionIds,
+        },
+      );
 
-      try {
-        // Update each question's display order
-        for (let i = 0; i < questionIds.length; i++) {
-          await sequelize.query(
-            `UPDATE follow_up_questions 
-             SET display_order = ?, updated_at = ? 
-             WHERE id = ? AND config_id = ?`,
-            {
-              replacements: [
-                i,
-                new Date().toISOString(),
-                questionIds[i],
-                configId,
-              ],
-              type: QueryTypes.UPDATE,
-              transaction,
-            },
-          );
-        }
-
-        await transaction.commit();
-        return true;
-      } catch (error) {
-        await transaction.rollback();
-        throw error;
+      if (!response.success) {
+        throw new Error(
+          response.error?.message || "Failed to reorder follow-up questions",
+        );
       }
+
+      return true;
     } catch (error) {
       logger.error(
         `Error reordering follow-up questions for config ${configId}`,
@@ -246,20 +156,21 @@ const followUpQuestionService = {
     limit: number = 3,
   ): Promise<string[]> => {
     try {
-      const sequelize = await getMySQLClient();
-
-      const questions = await sequelize.query(
-        `SELECT question FROM follow_up_questions 
-         WHERE config_id = ? AND is_active = true 
-         ORDER BY display_order ASC 
-         LIMIT ?`,
+      const response = await api.get<string[]>(
+        `/follow-up-configs/${configId}/questions/chat`,
         {
-          replacements: [configId, limit],
-          type: QueryTypes.SELECT,
+          params: { limit },
         },
       );
 
-      return questions.map((q: any) => q.question);
+      if (!response.success) {
+        throw new Error(
+          response.error?.message ||
+            "Failed to fetch follow-up questions for chat",
+        );
+      }
+
+      return response.data || [];
     } catch (error) {
       logger.error(
         `Error fetching follow-up questions for chat with config ${configId}`,

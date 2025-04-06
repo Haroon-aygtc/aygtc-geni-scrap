@@ -1,12 +1,12 @@
 /**
  * User Activity Service
- * Handles user activity tracking using MySQL database
+ *
+ * This service handles user activity tracking using the API layer
+ * instead of direct database access.
  */
 
-import axios from "axios";
 import logger from "@/utils/logger";
-import { getMySQLClient } from "./mysqlClient";
-import { v4 as uuidv4 } from "uuid";
+import { api } from "./api/middleware/apiMiddleware";
 
 export interface UserActivity {
   id?: string;
@@ -53,27 +53,14 @@ const userActivityService = {
         }
       }
 
-      const sequelize = await getMySQLClient();
-      const now = new Date().toISOString();
-      const id = uuidv4();
-
-      await sequelize.query(
-        `INSERT INTO user_activity 
-         (id, user_id, action, ip_address, user_agent, metadata, created_at) 
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        {
-          replacements: [
-            id,
-            activity.user_id,
-            activity.action,
-            activity.ip_address || null,
-            activity.user_agent || null,
-            activity.metadata ? JSON.stringify(activity.metadata) : null,
-            activity.created_at || now,
-          ],
-          type: sequelize.QueryTypes.INSERT,
-        },
+      const apiResponse = await api.post<{ id: string }>(
+        "/users/activity",
+        activity,
       );
+
+      if (!apiResponse.success) {
+        logger.warn("Failed to log user activity", apiResponse.error);
+      }
     } catch (error) {
       logger.error("Error logging user activity:", error);
       // Don't throw error to prevent disrupting user flow
@@ -88,28 +75,20 @@ const userActivityService = {
     limit = 20,
   ): Promise<UserActivity[]> => {
     try {
-      const sequelize = await getMySQLClient();
-
-      const activities = await sequelize.query(
-        `SELECT * FROM user_activity 
-         WHERE user_id = ? 
-         ORDER BY created_at DESC 
-         LIMIT ?`,
+      const response = await api.get<UserActivity[]>(
+        `/users/${userId}/activity`,
         {
-          replacements: [userId, limit],
-          type: sequelize.QueryTypes.SELECT,
+          params: { limit },
         },
       );
 
-      return activities.map((activity: any) => ({
-        id: activity.id,
-        user_id: activity.user_id,
-        action: activity.action,
-        ip_address: activity.ip_address,
-        user_agent: activity.user_agent,
-        metadata: activity.metadata ? JSON.parse(activity.metadata) : undefined,
-        created_at: activity.created_at,
-      }));
+      if (!response.success) {
+        throw new Error(
+          response.error?.message || "Failed to fetch user activity",
+        );
+      }
+
+      return response.data || [];
     } catch (error) {
       logger.error("Error fetching user activity:", error);
       throw error;
@@ -121,67 +100,13 @@ const userActivityService = {
    */
   updateSession: async (session: UserSession): Promise<void> => {
     try {
-      const sequelize = await getMySQLClient();
-      const now = new Date().toISOString();
-
-      // Check if session exists
-      const existingSessions = await sequelize.query(
-        `SELECT id FROM user_sessions 
-         WHERE user_id = ? 
-         AND JSON_EXTRACT(device_info, '$.name') = ? 
-         AND JSON_EXTRACT(device_info, '$.browser') = ?`,
-        {
-          replacements: [
-            session.user_id,
-            session.device_info.name,
-            session.device_info.browser,
-          ],
-          type: sequelize.QueryTypes.SELECT,
-        },
+      const response = await api.post<{ id: string }>(
+        "/users/sessions",
+        session,
       );
 
-      if (existingSessions.length > 0) {
-        // Update existing session
-        const existingSession = existingSessions[0];
-        await sequelize.query(
-          `UPDATE user_sessions 
-           SET last_active_at = ?, 
-               is_active = ?, 
-               ip_address = ?, 
-               location = ? 
-           WHERE id = ?`,
-          {
-            replacements: [
-              now,
-              session.is_active,
-              session.ip_address || null,
-              session.location || null,
-              existingSession.id,
-            ],
-            type: sequelize.QueryTypes.UPDATE,
-          },
-        );
-      } else {
-        // Create new session
-        const id = uuidv4();
-        await sequelize.query(
-          `INSERT INTO user_sessions 
-           (id, user_id, device_info, ip_address, location, last_active_at, created_at, is_active) 
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-          {
-            replacements: [
-              id,
-              session.user_id,
-              JSON.stringify(session.device_info),
-              session.ip_address || null,
-              session.location || null,
-              now,
-              session.created_at || now,
-              session.is_active,
-            ],
-            type: sequelize.QueryTypes.INSERT,
-          },
-        );
+      if (!response.success) {
+        logger.warn("Failed to update user session", response.error);
       }
     } catch (error) {
       logger.error("Error updating user session:", error);
@@ -194,32 +119,17 @@ const userActivityService = {
    */
   getUserSessions: async (userId: string): Promise<UserSession[]> => {
     try {
-      const sequelize = await getMySQLClient();
-
-      const sessions = await sequelize.query(
-        `SELECT * FROM user_sessions 
-         WHERE user_id = ? 
-         AND is_active = true 
-         ORDER BY last_active_at DESC`,
-        {
-          replacements: [userId],
-          type: sequelize.QueryTypes.SELECT,
-        },
+      const response = await api.get<UserSession[]>(
+        `/users/${userId}/sessions`,
       );
 
-      return sessions.map((session: any) => ({
-        id: session.id,
-        user_id: session.user_id,
-        device_info:
-          typeof session.device_info === "string"
-            ? JSON.parse(session.device_info)
-            : session.device_info,
-        ip_address: session.ip_address,
-        location: session.location,
-        last_active_at: session.last_active_at,
-        created_at: session.created_at,
-        is_active: session.is_active,
-      }));
+      if (!response.success) {
+        throw new Error(
+          response.error?.message || "Failed to fetch user sessions",
+        );
+      }
+
+      return response.data || [];
     } catch (error) {
       logger.error("Error fetching user sessions:", error);
       throw error;
@@ -231,17 +141,15 @@ const userActivityService = {
    */
   terminateSession: async (sessionId: string): Promise<void> => {
     try {
-      const sequelize = await getMySQLClient();
-
-      await sequelize.query(
-        `UPDATE user_sessions 
-         SET is_active = false 
-         WHERE id = ?`,
-        {
-          replacements: [sessionId],
-          type: sequelize.QueryTypes.UPDATE,
-        },
+      const response = await api.delete<{ success: boolean }>(
+        `/users/sessions/${sessionId}`,
       );
+
+      if (!response.success) {
+        throw new Error(
+          response.error?.message || "Failed to terminate user session",
+        );
+      }
     } catch (error) {
       logger.error("Error terminating user session:", error);
       throw error;
@@ -256,18 +164,18 @@ const userActivityService = {
     currentSessionId: string,
   ): Promise<void> => {
     try {
-      const sequelize = await getMySQLClient();
-
-      await sequelize.query(
-        `UPDATE user_sessions 
-         SET is_active = false 
-         WHERE user_id = ? 
-         AND id != ?`,
+      const response = await api.delete<{ success: boolean }>(
+        `/users/${userId}/sessions`,
         {
-          replacements: [userId, currentSessionId],
-          type: sequelize.QueryTypes.UPDATE,
+          params: { exceptSessionId: currentSessionId },
         },
       );
+
+      if (!response.success) {
+        throw new Error(
+          response.error?.message || "Failed to terminate all user sessions",
+        );
+      }
     } catch (error) {
       logger.error("Error terminating all user sessions:", error);
       throw error;

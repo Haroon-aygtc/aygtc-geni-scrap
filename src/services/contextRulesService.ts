@@ -1,6 +1,12 @@
-import { getMySQLClient, QueryTypes } from "@/services/mysqlClient";
+/**
+ * Context Rules Service
+ *
+ * This service handles interactions with context rules using the API layer
+ * instead of direct database access.
+ */
+
 import logger from "@/utils/logger";
-import { v4 as uuidv4 } from "uuid";
+import { api } from "./api/middleware/apiMiddleware";
 
 export interface ContextRule {
   id: string;
@@ -28,7 +34,7 @@ export interface ContextRulesResponse {
 }
 
 /**
- * Service for managing context rules using MySQL
+ * Service for managing context rules using the API layer
  */
 const contextRulesService = {
   /**
@@ -44,40 +50,17 @@ const contextRulesService = {
     includeInactive: boolean = false,
   ): Promise<ContextRulesResponse> => {
     try {
-      const sequelize = await getMySQLClient();
+      const response = await api.get<ContextRulesResponse>("/context-rules", {
+        params: { limit, offset, includeInactive },
+      });
 
-      // Build the query
-      let whereClause = "";
-      if (!includeInactive) {
-        whereClause = "WHERE is_active = true";
+      if (!response.success) {
+        throw new Error(
+          response.error?.message || "Failed to fetch context rules",
+        );
       }
 
-      // Get total count
-      const [countResult] = await sequelize.query(
-        `SELECT COUNT(*) as total FROM context_rules ${whereClause}`,
-        { type: QueryTypes.SELECT },
-      );
-
-      // Get rules with pagination
-      const rules = await sequelize.query(
-        `SELECT * FROM context_rules ${whereClause} ORDER BY priority DESC LIMIT :limit OFFSET :offset`,
-        {
-          replacements: { limit, offset },
-          type: QueryTypes.SELECT,
-        },
-      );
-
-      // Parse JSON fields
-      const parsedRules = rules.map((rule: any) => ({
-        ...rule,
-        conditions: JSON.parse(rule.conditions || "[]"),
-        actions: JSON.parse(rule.actions || "[]"),
-      }));
-
-      return {
-        rules: parsedRules,
-        totalCount: countResult.total || 0,
-      };
+      return response.data || { rules: [], totalCount: 0 };
     } catch (error) {
       logger.error("Error in getContextRules:", error);
       throw error;
@@ -91,26 +74,18 @@ const contextRulesService = {
    */
   getContextRuleById: async (ruleId: string): Promise<ContextRule | null> => {
     try {
-      const sequelize = await getMySQLClient();
+      const response = await api.get<ContextRule>(`/context-rules/${ruleId}`);
 
-      const [rule] = await sequelize.query(
-        "SELECT * FROM context_rules WHERE id = :ruleId",
-        {
-          replacements: { ruleId },
-          type: QueryTypes.SELECT,
-        },
-      );
-
-      if (!rule) {
-        return null;
+      if (!response.success) {
+        if (response.error?.code === "ERR_404") {
+          return null;
+        }
+        throw new Error(
+          response.error?.message || "Failed to fetch context rule",
+        );
       }
 
-      // Parse JSON fields
-      return {
-        ...rule,
-        conditions: JSON.parse(rule.conditions || "[]"),
-        actions: JSON.parse(rule.actions || "[]"),
-      };
+      return response.data || null;
     } catch (error) {
       logger.error(`Error in getContextRuleById for ${ruleId}:`, error);
       throw error;
@@ -126,41 +101,15 @@ const contextRulesService = {
     rule: Omit<ContextRule, "id" | "createdAt" | "updatedAt">,
   ): Promise<ContextRule> => {
     try {
-      const sequelize = await getMySQLClient();
-      const now = new Date().toISOString();
-      const id = uuidv4();
+      const response = await api.post<ContextRule>("/context-rules", rule);
 
-      // Stringify JSON fields
-      const conditions = JSON.stringify(rule.conditions || []);
-      const actions = JSON.stringify(rule.actions || []);
+      if (!response.success || !response.data) {
+        throw new Error(
+          response.error?.message || "Failed to create context rule",
+        );
+      }
 
-      await sequelize.query(
-        `INSERT INTO context_rules 
-        (id, name, description, priority, is_active, conditions, actions, created_at, updated_at) 
-        VALUES (:id, :name, :description, :priority, :isActive, :conditions, :actions, :createdAt, :updatedAt)`,
-        {
-          replacements: {
-            id,
-            name: rule.name,
-            description: rule.description,
-            priority: rule.priority,
-            isActive: rule.isActive,
-            conditions,
-            actions,
-            createdAt: now,
-            updatedAt: now,
-          },
-          type: QueryTypes.INSERT,
-        },
-      );
-
-      // Return the created rule
-      return {
-        id,
-        ...rule,
-        createdAt: now,
-        updatedAt: now,
-      };
+      return response.data;
     } catch (error) {
       logger.error("Error in createContextRule:", error);
       throw error;
@@ -178,57 +127,18 @@ const contextRulesService = {
     updates: Partial<Omit<ContextRule, "id" | "createdAt" | "updatedAt">>,
   ): Promise<ContextRule> => {
     try {
-      const sequelize = await getMySQLClient();
-      const now = new Date().toISOString();
-
-      // Build SET clause and replacements
-      const setClause = [];
-      const replacements: any = { ruleId, updatedAt: now };
-
-      if (updates.name !== undefined) {
-        setClause.push("name = :name");
-        replacements.name = updates.name;
-      }
-
-      if (updates.description !== undefined) {
-        setClause.push("description = :description");
-        replacements.description = updates.description;
-      }
-
-      if (updates.priority !== undefined) {
-        setClause.push("priority = :priority");
-        replacements.priority = updates.priority;
-      }
-
-      if (updates.isActive !== undefined) {
-        setClause.push("is_active = :isActive");
-        replacements.isActive = updates.isActive;
-      }
-
-      if (updates.conditions !== undefined) {
-        setClause.push("conditions = :conditions");
-        replacements.conditions = JSON.stringify(updates.conditions);
-      }
-
-      if (updates.actions !== undefined) {
-        setClause.push("actions = :actions");
-        replacements.actions = JSON.stringify(updates.actions);
-      }
-
-      // Always update the updated_at timestamp
-      setClause.push("updated_at = :updatedAt");
-
-      // Execute the update
-      await sequelize.query(
-        `UPDATE context_rules SET ${setClause.join(", ")} WHERE id = :ruleId`,
-        {
-          replacements,
-          type: QueryTypes.UPDATE,
-        },
+      const response = await api.put<ContextRule>(
+        `/context-rules/${ruleId}`,
+        updates,
       );
 
-      // Get the updated rule
-      return this.getContextRuleById(ruleId);
+      if (!response.success || !response.data) {
+        throw new Error(
+          response.error?.message || "Failed to update context rule",
+        );
+      }
+
+      return response.data;
     } catch (error) {
       logger.error(`Error in updateContextRule for ${ruleId}:`, error);
       throw error;
@@ -242,12 +152,15 @@ const contextRulesService = {
    */
   deleteContextRule: async (ruleId: string): Promise<void> => {
     try {
-      const sequelize = await getMySQLClient();
+      const response = await api.delete<{ success: boolean }>(
+        `/context-rules/${ruleId}`,
+      );
 
-      await sequelize.query("DELETE FROM context_rules WHERE id = :ruleId", {
-        replacements: { ruleId },
-        type: QueryTypes.DELETE,
-      });
+      if (!response.success) {
+        throw new Error(
+          response.error?.message || "Failed to delete context rule",
+        );
+      }
     } catch (error) {
       logger.error(`Error in deleteContextRule for ${ruleId}:`, error);
       throw error;
@@ -263,31 +176,15 @@ const contextRulesService = {
     rulePriorities: Record<string, number>,
   ): Promise<void> => {
     try {
-      const sequelize = await getMySQLClient();
-      const now = new Date().toISOString();
+      const response = await api.put<{ success: boolean }>(
+        "/context-rules/priorities",
+        { rulePriorities },
+      );
 
-      // Use a transaction to ensure all updates succeed or fail together
-      const transaction = await sequelize.transaction();
-
-      try {
-        // Update each rule's priority
-        for (const [ruleId, priority] of Object.entries(rulePriorities)) {
-          await sequelize.query(
-            "UPDATE context_rules SET priority = :priority, updated_at = :updatedAt WHERE id = :ruleId",
-            {
-              replacements: { ruleId, priority, updatedAt: now },
-              type: QueryTypes.UPDATE,
-              transaction,
-            },
-          );
-        }
-
-        // Commit the transaction
-        await transaction.commit();
-      } catch (error) {
-        // Rollback the transaction on error
-        await transaction.rollback();
-        throw error;
+      if (!response.success) {
+        throw new Error(
+          response.error?.message || "Failed to update rule priorities",
+        );
       }
     } catch (error) {
       logger.error("Error in updateRulePriorities:", error);
@@ -306,19 +203,18 @@ const contextRulesService = {
     isActive: boolean,
   ): Promise<ContextRule> => {
     try {
-      const sequelize = await getMySQLClient();
-      const now = new Date().toISOString();
-
-      await sequelize.query(
-        "UPDATE context_rules SET is_active = :isActive, updated_at = :updatedAt WHERE id = :ruleId",
-        {
-          replacements: { ruleId, isActive, updatedAt: now },
-          type: QueryTypes.UPDATE,
-        },
+      const response = await api.put<ContextRule>(
+        `/context-rules/${ruleId}/status`,
+        { isActive },
       );
 
-      // Get the updated rule
-      return this.getContextRuleById(ruleId);
+      if (!response.success || !response.data) {
+        throw new Error(
+          response.error?.message || "Failed to toggle rule status",
+        );
+      }
+
+      return response.data;
     } catch (error) {
       logger.error(`Error in toggleRuleStatus for ${ruleId}:`, error);
       throw error;

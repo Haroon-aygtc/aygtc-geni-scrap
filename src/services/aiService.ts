@@ -1,8 +1,5 @@
-import axios from "axios";
-import { getMySQLClient, QueryTypes } from "./mysqlClient.js";
-import { v4 as uuidv4 } from "uuid";
 import logger from "@/utils/logger";
-import aiModelFactory from "./ai/aiModelFactory";
+import { api } from "./api/middleware/apiMiddleware";
 import { AIModelRequest, AIModelResponse } from "./ai/types";
 
 interface AIInteractionLogsParams {
@@ -56,22 +53,31 @@ const aiService = {
         additionalParams: options.additionalParams,
       };
 
-      // Generate response using the AI model factory
-      const response = await aiModelFactory.generateResponse(modelRequest);
+      // Use the API to generate a response
+      const response = await api.post<AIModelResponse>(
+        "/ai/generate",
+        modelRequest,
+      );
+
+      if (!response.success || !response.data) {
+        throw new Error(
+          response.error?.message || "Failed to generate AI response",
+        );
+      }
 
       // Log the interaction
       await aiService.logInteraction({
         userId: options.userId,
         query: options.query,
-        response: response.content,
-        modelUsed: response.modelUsed,
+        response: response.data.content,
+        modelUsed: response.data.modelUsed,
         contextRuleId: options.contextRuleId,
-        knowledgeBaseResults: response.knowledgeBaseResults || 0,
-        knowledgeBaseIds: response.knowledgeBaseIds || [],
-        metadata: response.metadata,
+        knowledgeBaseResults: response.data.knowledgeBaseResults || 0,
+        knowledgeBaseIds: response.data.knowledgeBaseIds || [],
+        metadata: response.data.metadata,
       });
 
-      return response;
+      return response.data;
     } catch (error) {
       logger.error("Error generating AI response:", error);
 
@@ -116,31 +122,12 @@ const aiService = {
     metadata?: Record<string, any>;
   }) => {
     try {
-      const sequelize = await getMySQLClient();
-      const logId = uuidv4();
+      const response = await api.post<{ id: string }>("/ai/logs", data);
 
-      await sequelize.query(
-        `INSERT INTO ai_interaction_logs (
-          id, user_id, query, response, model_used, context_rule_id,
-          knowledge_base_results, knowledge_base_ids, metadata, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `,
-        {
-          replacements: [
-            logId,
-            data.userId,
-            data.query,
-            data.response,
-            data.modelUsed,
-            data.contextRuleId || null,
-            data.knowledgeBaseResults || 0,
-            data.knowledgeBaseIds ? data.knowledgeBaseIds.join(",") : null,
-            data.metadata ? JSON.stringify(data.metadata) : null,
-            new Date(),
-          ],
-          type: QueryTypes.INSERT,
-        },
-      );
+      if (!response.success) {
+        logger.error("Error logging AI interaction:", response.error);
+        return false;
+      }
 
       return true;
     } catch (error) {
@@ -154,75 +141,27 @@ const aiService = {
    */
   getInteractionLogs: async (params: AIInteractionLogsParams) => {
     try {
-      const sequelize = await getMySQLClient();
-      const { page = 1, pageSize = 20 } = params;
-      const offset = (page - 1) * pageSize;
+      const response = await api.get<{
+        logs: any[];
+        totalItems: number;
+        totalPages: number;
+        currentPage: number;
+      }>("/ai/logs", { params });
 
-      // Build WHERE clause based on filters
-      const whereConditions = [];
-      const replacements: any[] = [];
-
-      if (params.query) {
-        whereConditions.push("(query LIKE ? OR response LIKE ?)");
-        const searchTerm = `%${params.query}%`;
-        replacements.push(searchTerm, searchTerm);
+      if (!response.success) {
+        throw new Error(
+          response.error?.message || "Failed to fetch AI interaction logs",
+        );
       }
 
-      if (params.modelUsed) {
-        whereConditions.push("model_used = ?");
-        replacements.push(params.modelUsed);
-      }
-
-      if (params.contextRuleId) {
-        whereConditions.push("context_rule_id = ?");
-        replacements.push(params.contextRuleId);
-      }
-
-      if (params.startDate) {
-        whereConditions.push("created_at >= ?");
-        replacements.push(new Date(params.startDate));
-      }
-
-      if (params.endDate) {
-        whereConditions.push("created_at <= ?");
-        replacements.push(new Date(params.endDate));
-      }
-
-      const whereClause =
-        whereConditions.length > 0
-          ? `WHERE ${whereConditions.join(" AND ")}`
-          : "";
-
-      // Get total count for pagination
-      const [countResult] = await sequelize.query(
-        `SELECT COUNT(*) as total FROM ai_interaction_logs ${whereClause}`,
-        {
-          replacements,
-          type: QueryTypes.SELECT,
-        },
+      return (
+        response.data || {
+          logs: [],
+          totalItems: 0,
+          totalPages: 0,
+          currentPage: params.page,
+        }
       );
-
-      const totalItems = (countResult as any).total;
-      const totalPages = Math.ceil(totalItems / pageSize);
-
-      // Get logs with pagination
-      const logs = await sequelize.query(
-        `SELECT * FROM ai_interaction_logs 
-         ${whereClause}
-         ORDER BY created_at DESC
-         LIMIT ? OFFSET ?`,
-        {
-          replacements: [...replacements, pageSize, offset],
-          type: QueryTypes.SELECT,
-        },
-      );
-
-      return {
-        logs,
-        totalItems,
-        totalPages,
-        currentPage: page,
-      };
     } catch (error) {
       logger.error("Error getting AI interaction logs:", error);
       return {
@@ -239,21 +178,21 @@ const aiService = {
    */
   getAvailableModels: async () => {
     try {
-      const models = aiModelFactory.getAllModels();
-      const availableModels = [];
+      const response = await api.get<
+        Array<{
+          id: string;
+          name: string;
+          provider: string;
+        }>
+      >("/ai/models");
 
-      for (const model of models) {
-        const isAvailable = await model.isAvailable();
-        if (isAvailable) {
-          availableModels.push({
-            id: model.id,
-            name: model.name,
-            provider: model.provider,
-          });
-        }
+      if (!response.success) {
+        throw new Error(
+          response.error?.message || "Failed to fetch available AI models",
+        );
       }
 
-      return availableModels;
+      return response.data || [];
     } catch (error) {
       logger.error("Error getting available AI models:", error);
       return [];
@@ -263,9 +202,18 @@ const aiService = {
   /**
    * Set the default AI model
    */
-  setDefaultModel: (modelId: string) => {
+  setDefaultModel: async (modelId: string) => {
     try {
-      aiModelFactory.setDefaultModelId(modelId);
+      const response = await api.post<boolean>("/ai/models/default", {
+        modelId,
+      });
+
+      if (!response.success) {
+        throw new Error(
+          response.error?.message || "Failed to set default AI model",
+        );
+      }
+
       return true;
     } catch (error) {
       logger.error("Error setting default AI model:", error);
@@ -276,14 +224,21 @@ const aiService = {
   /**
    * Get the default AI model
    */
-  getDefaultModel: () => {
+  getDefaultModel: async () => {
     try {
-      const model = aiModelFactory.getDefaultModel();
-      return {
-        id: model.id,
-        name: model.name,
-        provider: model.provider,
-      };
+      const response = await api.get<{
+        id: string;
+        name: string;
+        provider: string;
+      }>("/ai/models/default");
+
+      if (!response.success) {
+        throw new Error(
+          response.error?.message || "Failed to get default AI model",
+        );
+      }
+
+      return response.data || null;
     } catch (error) {
       logger.error("Error getting default AI model:", error);
       return null;
@@ -295,86 +250,28 @@ const aiService = {
    */
   getModelPerformance: async (params: ModelPerformanceParams = {}) => {
     try {
-      const sequelize = await getMySQLClient();
-      const { timeRange = "7d", startDate, endDate } = params;
+      const response = await api.get<{
+        modelUsage: any[];
+        avgResponseTimes: any[];
+        dailyUsage: any[];
+        timeRange: string;
+      }>("/ai/performance", { params });
 
-      // Calculate date range based on timeRange or explicit dates
-      let startDateTime = startDate ? new Date(startDate) : new Date();
-      let endDateTime = endDate ? new Date(endDate) : new Date();
-
-      if (!startDate) {
-        // Parse timeRange (e.g., '7d', '30d', '24h')
-        const match = timeRange.match(/^(\d+)([dh])$/);
-        if (match) {
-          const value = parseInt(match[1]);
-          const unit = match[2];
-
-          if (unit === "d") {
-            startDateTime.setDate(startDateTime.getDate() - value);
-          } else if (unit === "h") {
-            startDateTime.setHours(startDateTime.getHours() - value);
-          }
-        }
+      if (!response.success) {
+        throw new Error(
+          response.error?.message ||
+            "Failed to fetch AI model performance metrics",
+        );
       }
 
-      // Format dates for SQL
-      const formattedStartDate = startDateTime
-        .toISOString()
-        .slice(0, 19)
-        .replace("T", " ");
-      const formattedEndDate = endDateTime
-        .toISOString()
-        .slice(0, 19)
-        .replace("T", " ");
-
-      // Get model usage counts
-      const modelUsage = await sequelize.query(
-        `SELECT model_used as model, COUNT(*) as count 
-         FROM ai_interaction_logs 
-         WHERE created_at BETWEEN ? AND ? 
-         GROUP BY model_used 
-         ORDER BY count DESC`,
-        {
-          replacements: [formattedStartDate, formattedEndDate],
-          type: QueryTypes.SELECT,
-        },
+      return (
+        response.data || {
+          modelUsage: [],
+          avgResponseTimes: [],
+          dailyUsage: [],
+          timeRange: params.timeRange || "7d",
+        }
       );
-
-      // Get daily usage
-      const dailyUsage = await sequelize.query(
-        `SELECT DATE(created_at) as date, COUNT(*) as count 
-         FROM ai_interaction_logs 
-         WHERE created_at BETWEEN ? AND ? 
-         GROUP BY DATE(created_at) 
-         ORDER BY date ASC`,
-        {
-          replacements: [formattedStartDate, formattedEndDate],
-          type: QueryTypes.SELECT,
-        },
-      );
-
-      // Calculate average response times (based on metadata if available)
-      // This assumes metadata might contain a responseTime field
-      const avgResponseTimes = await sequelize.query(
-        `SELECT model_used as model, 
-         AVG(JSON_EXTRACT(metadata, '$.responseTime')) as avgTime 
-         FROM ai_interaction_logs 
-         WHERE created_at BETWEEN ? AND ? 
-         AND metadata IS NOT NULL 
-         AND JSON_EXTRACT(metadata, '$.responseTime') IS NOT NULL 
-         GROUP BY model_used`,
-        {
-          replacements: [formattedStartDate, formattedEndDate],
-          type: QueryTypes.SELECT,
-        },
-      );
-
-      return {
-        modelUsage,
-        avgResponseTimes,
-        dailyUsage,
-        timeRange,
-      };
     } catch (error) {
       logger.error("Error getting AI model performance metrics:", error);
       return {

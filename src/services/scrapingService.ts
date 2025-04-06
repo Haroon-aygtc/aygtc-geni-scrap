@@ -1,15 +1,20 @@
-import axios from "axios";
-import { getMySQLClient, QueryTypes } from "./mysqlClient.js";
-import { v4 as uuidv4 } from "uuid";
+/**
+ * Scraping Service
+ *
+ * This service handles interactions with the scraping API endpoints
+ * instead of direct database access.
+ */
+
 import logger from "@/utils/logger";
+import { api } from "./api/middleware/apiMiddleware";
 
 export interface SelectorConfig {
   id: string;
   selector: string;
   name: string;
-  attribute?: string; // Optional attribute to extract (e.g., 'href', 'src')
+  attribute?: string;
   type: "text" | "html" | "attribute" | "list";
-  listItemSelector?: string; // For list type, selector for individual items
+  listItemSelector?: string;
 }
 
 export interface ScrapingTarget {
@@ -42,23 +47,12 @@ export interface ScrapingResult {
   data: Record<string, any>;
   success: boolean;
   error?: string;
-  screenshot?: string; // Base64 encoded screenshot if requested
+  screenshot?: string;
   metadata?: {
     statusCode?: number;
     contentType?: string;
     responseTime?: number;
     pageTitle?: string;
-  };
-}
-
-export interface DatabaseConfig {
-  table: string;
-  columns: Record<string, string>; // Maps selector IDs to column names
-  dbType?: "mysql";
-  options?: {
-    includeTimestamp?: boolean;
-    includeUrl?: boolean;
-    batchSize?: number;
   };
 }
 
@@ -175,102 +169,32 @@ export interface ScrapeResult {
 }
 
 class ScrapingService {
-  private activeJobs: Map<string, ScrapeResult> = new Map();
-  private batchSize = 5; // Number of URLs to process in parallel
-  private retryLimit = 3; // Number of retries for failed requests
-  private retryDelay = 1000; // Delay between retries in ms
+  private batchSize = 5;
+  private retryLimit = 3;
+  private retryDelay = 1000;
 
   /**
    * Scrapes data from multiple URLs based on provided selectors
-   * Enhanced to process URLs in parallel batches with retry logic
    */
   async scrapeMultipleUrls(
     targets: ScrapingTarget[],
   ): Promise<ScrapingResult[]> {
     try {
-      const results: ScrapingResult[] = [];
+      const response = await api.post<ScrapingResult[]>("/scraping/batch", {
+        targets,
+      });
 
-      // Process URLs in batches to avoid overwhelming the server
-      for (let i = 0; i < targets.length; i += this.batchSize) {
-        const batch = targets.slice(i, i + this.batchSize);
-        const batchPromises = batch.map((target) =>
-          this.scrapeWithRetry(target.url, target.selectors, target.options),
+      if (!response.success) {
+        throw new Error(
+          response.error?.message || "Failed to scrape multiple URLs",
         );
-
-        // Wait for all promises in the current batch to resolve
-        const batchResults = await Promise.allSettled(batchPromises);
-
-        // Process results, including both fulfilled and rejected promises
-        batchResults.forEach((result, index) => {
-          if (result.status === "fulfilled") {
-            results.push(result.value);
-          } else {
-            // Create an error result for failed requests
-            results.push({
-              url: batch[index].url,
-              timestamp: new Date().toISOString(),
-              data: {},
-              success: false,
-              error: result.reason?.message || "Failed to scrape URL",
-            });
-          }
-        });
-
-        // Add a small delay between batches to avoid rate limiting
-        if (i + this.batchSize < targets.length) {
-          await new Promise((resolve) => setTimeout(resolve, 500));
-        }
       }
 
-      return results;
+      return response.data || [];
     } catch (error) {
       logger.error("Error in scrapeMultipleUrls:", error);
-      throw new Error(`Failed to scrape multiple URLs: ${error.message}`);
+      throw error;
     }
-  }
-
-  /**
-   * Scrapes a single URL with retry logic
-   */
-  private async scrapeWithRetry(
-    url: string,
-    selectors: SelectorConfig[],
-    options?: ScrapingTarget["options"],
-  ): Promise<ScrapingResult> {
-    let attempts = 0;
-    let lastError: any;
-
-    while (attempts < this.retryLimit) {
-      try {
-        const response = await axios.post("/api/scraping/scrape", {
-          targets: [{ url, selectors, options }],
-        });
-        return response.data[0];
-      } catch (error) {
-        lastError = error;
-        attempts++;
-
-        // Wait before retrying
-        if (attempts < this.retryLimit) {
-          await new Promise((resolve) =>
-            setTimeout(resolve, this.retryDelay * attempts),
-          );
-        }
-      }
-    }
-
-    // All retries failed
-    logger.error(
-      `Error scraping URL ${url} after ${attempts} attempts:`,
-      lastError,
-    );
-    return {
-      url,
-      timestamp: new Date().toISOString(),
-      data: {},
-      success: false,
-      error: lastError?.message || `Failed after ${attempts} attempts`,
-    };
   }
 
   /**
@@ -281,139 +205,27 @@ class ScrapingService {
     selectors: SelectorConfig[],
     options?: ScrapingTarget["options"],
   ): Promise<ScrapingResult> {
-    return this.scrapeWithRetry(url, selectors, options);
-  }
-
-  /**
-   * Saves scraping results to a database
-   */
-  async saveToDatabase(
-    results: ScrapingResult[],
-    dbConfig: DatabaseConfig,
-  ): Promise<boolean> {
     try {
-      const db = await getMySQLClient();
-      const transaction = await db.transaction();
-
-      try {
-        // Create table if it doesn't exist
-        const createTableQuery = this.generateCreateTableQuery(dbConfig);
-        await db.query(createTableQuery, { transaction, type: QueryTypes.RAW });
-
-        // Insert data
-        for (const result of results) {
-          if (!result.success) continue;
-
-          const insertQuery = this.generateInsertQuery(result, dbConfig);
-          await db.query(insertQuery.query, {
-            replacements: insertQuery.values,
-            transaction,
-            type: QueryTypes.INSERT,
-          });
-        }
-
-        await transaction.commit();
-        return true;
-      } catch (error) {
-        await transaction.rollback();
-        throw error;
-      }
-    } catch (error) {
-      logger.error("Error saving scraping results to database:", error);
-      throw new Error(`Failed to save results to database: ${error.message}`);
-    }
-  }
-
-  /**
-   * Generate CREATE TABLE query based on database config
-   */
-  private generateCreateTableQuery(dbConfig: DatabaseConfig): string {
-    const columns = [];
-
-    // Add ID column
-    columns.push("id VARCHAR(36) PRIMARY KEY");
-
-    // Add URL column if needed
-    if (dbConfig.options?.includeUrl) {
-      columns.push("url VARCHAR(2048) NOT NULL");
-    }
-
-    // Add timestamp column if needed
-    if (dbConfig.options?.includeTimestamp) {
-      columns.push("created_at DATETIME DEFAULT CURRENT_TIMESTAMP");
-    }
-
-    // Add columns for each selector
-    for (const [selectorId, columnName] of Object.entries(dbConfig.columns)) {
-      columns.push(`${columnName} TEXT`);
-    }
-
-    // Add metadata column
-    columns.push("metadata JSON");
-
-    return `CREATE TABLE IF NOT EXISTS ${dbConfig.table} (${columns.join(", ")})`;
-  }
-
-  /**
-   * Generate INSERT query based on scraping result and database config
-   */
-  private generateInsertQuery(
-    result: ScrapingResult,
-    dbConfig: DatabaseConfig,
-  ): { query: string; values: any[] } {
-    const columns = ["id"];
-    const placeholders = ["?"];
-    const values = [uuidv4()];
-
-    // Add URL if needed
-    if (dbConfig.options?.includeUrl) {
-      columns.push("url");
-      placeholders.push("?");
-      values.push(result.url);
-    }
-
-    // Add timestamp if needed
-    if (dbConfig.options?.includeTimestamp) {
-      columns.push("created_at");
-      placeholders.push("?");
-      values.push(new Date());
-    }
-
-    // Add data for each column
-    for (const [selectorId, columnName] of Object.entries(dbConfig.columns)) {
-      columns.push(columnName);
-      placeholders.push("?");
-      values.push(JSON.stringify(result.data[selectorId] || null));
-    }
-
-    // Add metadata
-    columns.push("metadata");
-    placeholders.push("?");
-    values.push(JSON.stringify(result.metadata || {}));
-
-    const query = `INSERT INTO ${dbConfig.table} (${columns.join(", ")}) VALUES (${placeholders.join(", ")})`;
-
-    return { query, values };
-  }
-
-  /**
-   * Saves scraping results to a file
-   */
-  async saveToFile(
-    results: ScrapingResult[],
-    filename: string,
-    format: "json" | "csv" | "xml" | "excel" = "json",
-  ): Promise<string> {
-    try {
-      const response = await axios.post("/api/scraping/save-file", {
-        results,
-        filename,
-        format,
+      const response = await api.post<ScrapingResult>("/scraping/scrape", {
+        url,
+        selectors,
+        options,
       });
-      return response.data.filePath;
+
+      if (!response.success || !response.data) {
+        throw new Error(response.error?.message || "Failed to scrape URL");
+      }
+
+      return response.data;
     } catch (error) {
-      logger.error("Error saving scraping results to file:", error);
-      throw new Error(`Failed to save results to file: ${error.message}`);
+      logger.error(`Error scraping URL ${url}:`, error);
+      return {
+        url,
+        timestamp: new Date().toISOString(),
+        data: {},
+        success: false,
+        error: error.message || "Failed to scrape URL",
+      };
     }
   }
 
@@ -422,11 +234,20 @@ class ScrapingService {
    */
   async fetchHtmlPreview(url: string): Promise<string> {
     try {
-      const response = await axios.post("/api/scraping/fetch", { url });
-      return response.data.html;
+      const response = await api.post<{ html: string }>("/scraping/fetch", {
+        url,
+      });
+
+      if (!response.success || !response.data) {
+        throw new Error(
+          response.error?.message || "Failed to fetch HTML preview",
+        );
+      }
+
+      return response.data.html || "";
     } catch (error) {
       logger.error("Error fetching HTML preview:", error);
-      throw new Error(`Failed to fetch HTML preview: ${error.message}`);
+      throw error;
     }
   }
 
@@ -438,11 +259,30 @@ class ScrapingService {
     selector: SelectorConfig,
   ): Promise<{ success: boolean; result: any; error?: string }> {
     try {
-      const response = await axios.post("/api/scraping/test-selector", {
+      const response = await api.post<{
+        success: boolean;
+        result: any;
+        error?: string;
+      }>("/scraping/test-selector", {
         url,
         selector,
       });
-      return response.data;
+
+      if (!response.success) {
+        return {
+          success: false,
+          result: null,
+          error: response.error?.message || "Failed to test selector",
+        };
+      }
+
+      return (
+        response.data || {
+          success: false,
+          result: null,
+          error: "No response data",
+        }
+      );
     } catch (error) {
       logger.error("Error testing selector:", error);
       return {
@@ -466,114 +306,84 @@ class ScrapingService {
   }
 
   /**
-   * Generates a filename based on URL and timestamp
-   */
-  generateFilename(url: string, format: string): string {
-    const domain = new URL(url).hostname.replace(/\./g, "_");
-    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-    return `scraping_${domain}_${timestamp}.${format}`;
-  }
-
-  /**
    * Start a new scraping job with AI processing
    */
   async startScraping(options: ScrapeOptions): Promise<string> {
     try {
-      // Generate a unique job ID
-      const jobId = uuidv4();
+      const response = await api.post<{ jobId: string }>(
+        "/scraping/jobs",
+        options,
+      );
 
-      // Create initial job state
-      const initialState: ScrapeResult = {
-        id: jobId,
-        url: options.url,
-        timestamp: new Date().toISOString(),
-        status: "in-progress",
-        progress: 0,
-        data: {
-          text: [],
-          images: [],
-          videos: [],
-          tables: [],
-          lists: [],
-        },
-        metadata: {
-          pageTitle: "",
-          pageDescription: "",
-          pageKeywords: [],
-          totalElements: 0,
-        },
-      };
+      if (!response.success || !response.data) {
+        throw new Error(
+          response.error?.message || "Failed to start scraping job",
+        );
+      }
 
-      // Store the job state
-      this.activeJobs.set(jobId, initialState);
-
-      // Start the scraping process asynchronously
-      this.processScraping(jobId, options).catch((error) => {
-        logger.error(`Error processing job ${jobId}:`, error);
-        const job = this.activeJobs.get(jobId);
-        if (job) {
-          job.status = "failed";
-          job.error = error.message;
-          this.activeJobs.set(jobId, job);
-        }
-      });
-
-      return jobId;
+      return response.data.jobId;
     } catch (error) {
       logger.error("Error starting scraping job:", error);
-      throw new Error(`Failed to start scraping job: ${error.message}`);
+      throw error;
     }
   }
 
   /**
-   * Process a scraping job with progress tracking
+   * Get the status and results of a scraping job
    */
-  private async processScraping(
-    jobId: string,
-    options: ScrapeOptions,
-  ): Promise<void> {
+  async getJobStatus(jobId: string): Promise<ScrapeResult | null> {
     try {
-      // Get the job state
-      const job = this.activeJobs.get(jobId);
-      if (!job) throw new Error(`Job ${jobId} not found`);
+      const response = await api.get<ScrapeResult>(`/scraping/jobs/${jobId}`);
 
-      // Update progress
-      job.progress = 10;
-      this.activeJobs.set(jobId, job);
-
-      // Call the API to start the scraping job
-      const response = await axios.post("/api/scraping/start-job", {
-        options,
-        jobId,
-      });
-
-      // Update job with initial results
-      job.progress = 50;
-      job.metadata = {
-        ...job.metadata,
-        ...response.data.metadata,
-      };
-      this.activeJobs.set(jobId, job);
-
-      // If AI processing is enabled, run it
-      if (options.aiOptions?.enabled) {
-        await this.runAIAnalysis(jobId, options.aiOptions);
+      if (!response.success) {
+        if (response.error?.code === "ERR_404") {
+          return null;
+        }
+        throw new Error(response.error?.message || "Failed to get job status");
       }
 
-      // Mark job as completed
-      job.status = "completed";
-      job.progress = 100;
-      this.activeJobs.set(jobId, job);
+      return response.data || null;
     } catch (error) {
-      logger.error(`Error processing job ${jobId}:`, error);
-      const job = this.activeJobs.get(jobId);
-      if (job) {
-        job.status = "failed";
-        job.error = error.message;
-        job.progress = 0;
-        this.activeJobs.set(jobId, job);
+      logger.error(`Error getting job status for ${jobId}:`, error);
+      return null;
+    }
+  }
+
+  /**
+   * Get all scraping jobs
+   */
+  async getAllJobs(): Promise<ScrapeResult[]> {
+    try {
+      const response = await api.get<ScrapeResult[]>("/scraping/jobs");
+
+      if (!response.success) {
+        throw new Error(response.error?.message || "Failed to get all jobs");
       }
-      throw error;
+
+      return response.data || [];
+    } catch (error) {
+      logger.error("Error getting all jobs:", error);
+      return [];
+    }
+  }
+
+  /**
+   * Delete a scraping job
+   */
+  async deleteJob(jobId: string): Promise<boolean> {
+    try {
+      const response = await api.delete<{ success: boolean }>(
+        `/scraping/jobs/${jobId}`,
+      );
+
+      if (!response.success) {
+        throw new Error(response.error?.message || "Failed to delete job");
+      }
+
+      return true;
+    } catch (error) {
+      logger.error(`Error deleting job ${jobId}:`, error);
+      return false;
     }
   }
 
@@ -585,51 +395,20 @@ class ScrapingService {
     options: ScrapeOptions["aiOptions"],
   ): Promise<any> {
     try {
-      // Get the job state
-      const job = this.activeJobs.get(resultId);
-      if (!job) throw new Error(`Job ${resultId} not found`);
+      const response = await api.post<any>(
+        `/scraping/jobs/${resultId}/analyze`,
+        { options },
+      );
 
-      // Update progress
-      job.progress = 60;
-      this.activeJobs.set(resultId, job);
+      if (!response.success) {
+        throw new Error(response.error?.message || "Failed to run AI analysis");
+      }
 
-      // Call the API to run AI analysis
-      const response = await axios.post("/api/scraping/analyze", {
-        resultId,
-        options,
-      });
-
-      // Update job with AI analysis results
-      job.progress = 90;
-      job.aiAnalysis = response.data.aiAnalysis;
-      this.activeJobs.set(resultId, job);
-
-      return response.data;
+      return response.data || {};
     } catch (error) {
       logger.error("Error running AI analysis:", error);
-      throw new Error(`Failed to run AI analysis: ${error.message}`);
+      throw error;
     }
-  }
-
-  /**
-   * Get the status and results of a scraping job
-   */
-  getJobStatus(jobId: string): ScrapeResult | null {
-    return this.activeJobs.get(jobId) || null;
-  }
-
-  /**
-   * Get all scraping jobs
-   */
-  getAllJobs(): ScrapeResult[] {
-    return Array.from(this.activeJobs.values());
-  }
-
-  /**
-   * Delete a scraping job
-   */
-  deleteJob(jobId: string): boolean {
-    return this.activeJobs.delete(jobId);
   }
 }
 

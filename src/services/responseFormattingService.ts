@@ -1,7 +1,12 @@
-import { getMySQLClient, QueryTypes } from "./mysqlClient.js";
-import { v4 as uuidv4 } from "uuid";
+/**
+ * Response Formatting Service
+ *
+ * This service handles interactions with response formatting configurations using the API layer
+ * instead of direct database access.
+ */
+
 import logger from "@/utils/logger";
-import { ResponseFormattingConfig, ResponseTemplate } from "@/models";
+import { api } from "./api/middleware/apiMiddleware";
 
 export interface ResponseFormattingConfigData {
   id?: string;
@@ -33,32 +38,21 @@ const responseFormattingService = {
     userId: string,
   ): Promise<ResponseFormattingConfigData[]> => {
     try {
-      const configs = await ResponseFormattingConfig.findAll({
-        where: { user_id: userId },
-        include: [ResponseTemplate],
-      });
+      const response = await api.get<ResponseFormattingConfigData[]>(
+        "/response-formatting",
+        {
+          params: { userId },
+        },
+      );
 
-      return configs.map((config: any) => {
-        return {
-          id: config.id,
-          userId: config.user_id,
-          name: config.name,
-          enableMarkdown: config.enable_markdown,
-          defaultHeadingLevel: config.default_heading_level,
-          enableBulletPoints: config.enable_bullet_points,
-          enableNumberedLists: config.enable_numbered_lists,
-          enableEmphasis: config.enable_emphasis,
-          responseVariability: config.response_variability,
-          defaultTemplate: config.default_template,
-          isDefault: config.is_default,
-          customTemplates: config.ResponseTemplates?.map((template: any) => ({
-            id: template.id,
-            name: template.name,
-            template: template.template,
-            description: template.description,
-          })),
-        };
-      });
+      if (!response.success) {
+        throw new Error(
+          response.error?.message ||
+            "Failed to fetch response formatting configurations",
+        );
+      }
+
+      return response.data || [];
     } catch (error) {
       logger.error("Error getting response formatting configs:", error);
       throw error;
@@ -72,31 +66,21 @@ const responseFormattingService = {
     id: string,
   ): Promise<ResponseFormattingConfigData | null> => {
     try {
-      const config = await ResponseFormattingConfig.findByPk(id, {
-        include: [ResponseTemplate],
-      });
+      const response = await api.get<ResponseFormattingConfigData>(
+        `/response-formatting/${id}`,
+      );
 
-      if (!config) return null;
+      if (!response.success) {
+        if (response.error?.code === "ERR_404") {
+          return null;
+        }
+        throw new Error(
+          response.error?.message ||
+            "Failed to fetch response formatting configuration",
+        );
+      }
 
-      return {
-        id: config.id,
-        userId: config.user_id,
-        name: config.name,
-        enableMarkdown: config.enable_markdown,
-        defaultHeadingLevel: config.default_heading_level,
-        enableBulletPoints: config.enable_bullet_points,
-        enableNumberedLists: config.enable_numbered_lists,
-        enableEmphasis: config.enable_emphasis,
-        responseVariability: config.response_variability,
-        defaultTemplate: config.default_template,
-        isDefault: config.is_default,
-        customTemplates: config.ResponseTemplates?.map((template: any) => ({
-          id: template.id,
-          name: template.name,
-          template: template.template,
-          description: template.description,
-        })),
-      };
+      return response.data || null;
     } catch (error) {
       logger.error(`Error getting response formatting config ${id}:`, error);
       throw error;
@@ -110,32 +94,24 @@ const responseFormattingService = {
     userId: string,
   ): Promise<ResponseFormattingConfigData | null> => {
     try {
-      const config = await ResponseFormattingConfig.findOne({
-        where: { user_id: userId, is_default: true },
-        include: [ResponseTemplate],
-      });
+      const response = await api.get<ResponseFormattingConfigData>(
+        `/response-formatting/default`,
+        {
+          params: { userId },
+        },
+      );
 
-      if (!config) return null;
+      if (!response.success) {
+        if (response.error?.code === "ERR_404") {
+          return null;
+        }
+        throw new Error(
+          response.error?.message ||
+            "Failed to fetch default response formatting configuration",
+        );
+      }
 
-      return {
-        id: config.id,
-        userId: config.user_id,
-        name: config.name,
-        enableMarkdown: config.enable_markdown,
-        defaultHeadingLevel: config.default_heading_level,
-        enableBulletPoints: config.enable_bullet_points,
-        enableNumberedLists: config.enable_numbered_lists,
-        enableEmphasis: config.enable_emphasis,
-        responseVariability: config.response_variability,
-        defaultTemplate: config.default_template,
-        isDefault: config.is_default,
-        customTemplates: config.ResponseTemplates?.map((template: any) => ({
-          id: template.id,
-          name: template.name,
-          template: template.template,
-          description: template.description,
-        })),
-      };
+      return response.data || null;
     } catch (error) {
       logger.error(
         `Error getting default response formatting config for user ${userId}:`,
@@ -151,60 +127,21 @@ const responseFormattingService = {
   createResponseFormattingConfig: async (
     data: ResponseFormattingConfigData,
   ): Promise<ResponseFormattingConfigData> => {
-    const sequelize = await getMySQLClient();
-    const transaction = await sequelize.transaction();
-
     try {
-      // If this is set as default, unset any existing default
-      if (data.isDefault) {
-        await ResponseFormattingConfig.update(
-          { is_default: false },
-          { where: { user_id: data.userId, is_default: true }, transaction },
+      const response = await api.post<ResponseFormattingConfigData>(
+        "/response-formatting",
+        data,
+      );
+
+      if (!response.success || !response.data) {
+        throw new Error(
+          response.error?.message ||
+            "Failed to create response formatting configuration",
         );
       }
 
-      // Create the config
-      const config = await ResponseFormattingConfig.create(
-        {
-          id: data.id || uuidv4(),
-          user_id: data.userId,
-          name: data.name,
-          enable_markdown: data.enableMarkdown,
-          default_heading_level: data.defaultHeadingLevel,
-          enable_bullet_points: data.enableBulletPoints,
-          enable_numbered_lists: data.enableNumberedLists,
-          enable_emphasis: data.enableEmphasis,
-          response_variability: data.responseVariability,
-          default_template: data.defaultTemplate,
-          is_default: data.isDefault || false,
-        },
-        { transaction },
-      );
-
-      // Create custom templates
-      if (data.customTemplates && data.customTemplates.length > 0) {
-        for (const templateData of data.customTemplates) {
-          await ResponseTemplate.create(
-            {
-              id: templateData.id || uuidv4(),
-              config_id: config.id,
-              name: templateData.name,
-              template: templateData.template,
-              description: templateData.description,
-            },
-            { transaction },
-          );
-        }
-      }
-
-      await transaction.commit();
-
-      // Return the created config with all related data
-      return responseFormattingService.getResponseFormattingConfig(
-        config.id,
-      ) as Promise<ResponseFormattingConfigData>;
+      return response.data;
     } catch (error) {
-      await transaction.rollback();
       logger.error("Error creating response formatting config:", error);
       throw error;
     }
@@ -217,99 +154,21 @@ const responseFormattingService = {
     id: string,
     data: Partial<ResponseFormattingConfigData>,
   ): Promise<ResponseFormattingConfigData> => {
-    const sequelize = await getMySQLClient();
-    const transaction = await sequelize.transaction();
-
     try {
-      const config = await ResponseFormattingConfig.findByPk(id);
-      if (!config) {
-        throw new Error(`Response formatting config with ID ${id} not found`);
-      }
+      const response = await api.put<ResponseFormattingConfigData>(
+        `/response-formatting/${id}`,
+        data,
+      );
 
-      // If this is set as default, unset any existing default
-      if (data.isDefault) {
-        await ResponseFormattingConfig.update(
-          { is_default: false },
-          {
-            where: {
-              user_id: config.user_id,
-              is_default: true,
-              id: { [sequelize.Op.ne]: id },
-            },
-            transaction,
-          },
+      if (!response.success || !response.data) {
+        throw new Error(
+          response.error?.message ||
+            "Failed to update response formatting configuration",
         );
       }
 
-      // Update the config
-      await config.update(
-        {
-          name: data.name !== undefined ? data.name : config.name,
-          enable_markdown:
-            data.enableMarkdown !== undefined
-              ? data.enableMarkdown
-              : config.enable_markdown,
-          default_heading_level:
-            data.defaultHeadingLevel !== undefined
-              ? data.defaultHeadingLevel
-              : config.default_heading_level,
-          enable_bullet_points:
-            data.enableBulletPoints !== undefined
-              ? data.enableBulletPoints
-              : config.enable_bullet_points,
-          enable_numbered_lists:
-            data.enableNumberedLists !== undefined
-              ? data.enableNumberedLists
-              : config.enable_numbered_lists,
-          enable_emphasis:
-            data.enableEmphasis !== undefined
-              ? data.enableEmphasis
-              : config.enable_emphasis,
-          response_variability:
-            data.responseVariability !== undefined
-              ? data.responseVariability
-              : config.response_variability,
-          default_template:
-            data.defaultTemplate !== undefined
-              ? data.defaultTemplate
-              : config.default_template,
-          is_default:
-            data.isDefault !== undefined ? data.isDefault : config.is_default,
-        },
-        { transaction },
-      );
-
-      // Update custom templates if provided
-      if (data.customTemplates) {
-        // Delete existing templates
-        await ResponseTemplate.destroy({
-          where: { config_id: id },
-          transaction,
-        });
-
-        // Create new templates
-        for (const templateData of data.customTemplates) {
-          await ResponseTemplate.create(
-            {
-              id: templateData.id || uuidv4(),
-              config_id: id,
-              name: templateData.name,
-              template: templateData.template,
-              description: templateData.description,
-            },
-            { transaction },
-          );
-        }
-      }
-
-      await transaction.commit();
-
-      // Return the updated config with all related data
-      return responseFormattingService.getResponseFormattingConfig(
-        id,
-      ) as Promise<ResponseFormattingConfigData>;
+      return response.data;
     } catch (error) {
-      await transaction.rollback();
       logger.error(`Error updating response formatting config ${id}:`, error);
       throw error;
     }
@@ -320,8 +179,18 @@ const responseFormattingService = {
    */
   deleteResponseFormattingConfig: async (id: string): Promise<boolean> => {
     try {
-      const result = await ResponseFormattingConfig.destroy({ where: { id } });
-      return result > 0;
+      const response = await api.delete<{ success: boolean }>(
+        `/response-formatting/${id}`,
+      );
+
+      if (!response.success) {
+        throw new Error(
+          response.error?.message ||
+            "Failed to delete response formatting configuration",
+        );
+      }
+
+      return true;
     } catch (error) {
       logger.error(`Error deleting response formatting config ${id}:`, error);
       throw error;
@@ -333,16 +202,17 @@ const responseFormattingService = {
    */
   getResponseTemplates: async (): Promise<ResponseTemplateData[]> => {
     try {
-      const templates = await ResponseTemplate.findAll({
-        where: { config_id: null }, // Get global templates
-      });
+      const response = await api.get<ResponseTemplateData[]>(
+        "/response-formatting/templates",
+      );
 
-      return templates.map((template: any) => ({
-        id: template.id,
-        name: template.name,
-        template: template.template,
-        description: template.description,
-      }));
+      if (!response.success) {
+        throw new Error(
+          response.error?.message || "Failed to fetch response templates",
+        );
+      }
+
+      return response.data || [];
     } catch (error) {
       logger.error("Error getting response templates:", error);
       throw error;
@@ -356,15 +226,20 @@ const responseFormattingService = {
     id: string,
   ): Promise<ResponseTemplateData | null> => {
     try {
-      const template = await ResponseTemplate.findByPk(id);
-      if (!template) return null;
+      const response = await api.get<ResponseTemplateData>(
+        `/response-formatting/templates/${id}`,
+      );
 
-      return {
-        id: template.id,
-        name: template.name,
-        template: template.template,
-        description: template.description,
-      };
+      if (!response.success) {
+        if (response.error?.code === "ERR_404") {
+          return null;
+        }
+        throw new Error(
+          response.error?.message || "Failed to fetch response template",
+        );
+      }
+
+      return response.data || null;
     } catch (error) {
       logger.error(`Error getting response template ${id}:`, error);
       throw error;

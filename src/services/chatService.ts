@@ -1,6 +1,6 @@
-import { getMySQLClient, QueryTypes } from "./mysqlClient.js";
 import { v4 as uuidv4 } from "uuid";
 import logger from "@/utils/logger";
+import { api } from "./api/middleware/apiMiddleware";
 
 export interface ChatMessage {
   id: string;
@@ -32,24 +32,19 @@ const chatService = {
     metadata?: Record<string, any>,
   ): Promise<ChatSession> => {
     try {
-      const sessionId = uuidv4();
-      const db = await getMySQLClient();
+      const response = await api.post<ChatSession>("/chat/sessions", {
+        userId: userId || null,
+        widgetId: widgetId || null,
+        metadata: metadata || null,
+      });
 
-      await db.query(
-        "INSERT INTO chat_sessions (id, user_id, widget_id, status, metadata, created_at, updated_at) VALUES (?, ?, ?, ?, ?, NOW(), NOW())",
-        {
-          replacements: [
-            sessionId,
-            userId || null,
-            widgetId || null,
-            "active",
-            metadata ? JSON.stringify(metadata) : null,
-          ],
-          type: QueryTypes.INSERT,
-        },
-      );
+      if (!response.success || !response.data) {
+        throw new Error(
+          response.error?.message || "Failed to create chat session",
+        );
+      }
 
-      return chatService.getSessionById(sessionId) as Promise<ChatSession>;
+      return response.data;
     } catch (error) {
       logger.error("Error creating chat session:", error);
       throw new Error(`Failed to create chat session: ${error.message}`);
@@ -61,16 +56,20 @@ const chatService = {
    */
   getSessionById: async (sessionId: string): Promise<ChatSession | null> => {
     try {
-      const db = await getMySQLClient();
-      const sessions = await db.query(
-        "SELECT * FROM chat_sessions WHERE id = ?",
-        {
-          replacements: [sessionId],
-          type: QueryTypes.SELECT,
-        },
+      const response = await api.get<ChatSession>(
+        `/chat/sessions/${sessionId}`,
       );
 
-      return sessions.length > 0 ? (sessions[0] as ChatSession) : null;
+      if (!response.success) {
+        if (response.error?.code === "ERR_404") {
+          return null;
+        }
+        throw new Error(
+          response.error?.message || "Failed to fetch chat session",
+        );
+      }
+
+      return response.data || null;
     } catch (error) {
       logger.error(`Error fetching chat session ${sessionId}:`, error);
       throw new Error(`Failed to fetch chat session: ${error.message}`);
@@ -82,16 +81,18 @@ const chatService = {
    */
   getSessionsByUserId: async (userId: string): Promise<ChatSession[]> => {
     try {
-      const db = await getMySQLClient();
-      const sessions = await db.query(
-        "SELECT * FROM chat_sessions WHERE user_id = ? ORDER BY updated_at DESC",
-        {
-          replacements: [userId],
-          type: QueryTypes.SELECT,
-        },
-      );
+      const response = await api.get<{
+        sessions: ChatSession[];
+        totalCount: number;
+      }>(`/chat/users/${userId}/sessions`);
 
-      return sessions as ChatSession[];
+      if (!response.success || !response.data) {
+        throw new Error(
+          response.error?.message || "Failed to fetch chat sessions",
+        );
+      }
+
+      return response.data.sessions || [];
     } catch (error) {
       logger.error(`Error fetching chat sessions for user ${userId}:`, error);
       throw new Error(`Failed to fetch chat sessions: ${error.message}`);
@@ -103,16 +104,18 @@ const chatService = {
    */
   getSessionsByWidgetId: async (widgetId: string): Promise<ChatSession[]> => {
     try {
-      const db = await getMySQLClient();
-      const sessions = await db.query(
-        "SELECT * FROM chat_sessions WHERE widget_id = ? ORDER BY updated_at DESC",
-        {
-          replacements: [widgetId],
-          type: QueryTypes.SELECT,
-        },
-      );
+      const response = await api.get<{
+        sessions: ChatSession[];
+        totalCount: number;
+      }>(`/chat/widgets/${widgetId}/sessions`);
 
-      return sessions as ChatSession[];
+      if (!response.success || !response.data) {
+        throw new Error(
+          response.error?.message || "Failed to fetch chat sessions",
+        );
+      }
+
+      return response.data.sessions || [];
     } catch (error) {
       logger.error(
         `Error fetching chat sessions for widget ${widgetId}:`,
@@ -130,47 +133,18 @@ const chatService = {
     data: Partial<ChatSession>,
   ): Promise<ChatSession> => {
     try {
-      const db = await getMySQLClient();
-      const updateFields = [];
-      const replacements = [];
+      const response = await api.put<ChatSession>(
+        `/chat/sessions/${sessionId}`,
+        data,
+      );
 
-      if (data.status !== undefined) {
-        updateFields.push("status = ?");
-        replacements.push(data.status);
-      }
-
-      if (data.metadata !== undefined) {
-        updateFields.push("metadata = ?");
-        replacements.push(JSON.stringify(data.metadata));
-      }
-
-      if (data.user_id !== undefined) {
-        updateFields.push("user_id = ?");
-        replacements.push(data.user_id);
-      }
-
-      if (data.widget_id !== undefined) {
-        updateFields.push("widget_id = ?");
-        replacements.push(data.widget_id);
-      }
-
-      // Always update the updated_at timestamp
-      updateFields.push("updated_at = NOW()");
-
-      // Add the session ID to the replacements
-      replacements.push(sessionId);
-
-      if (updateFields.length > 0) {
-        await db.query(
-          `UPDATE chat_sessions SET ${updateFields.join(", ")} WHERE id = ?`,
-          {
-            replacements,
-            type: QueryTypes.UPDATE,
-          },
+      if (!response.success || !response.data) {
+        throw new Error(
+          response.error?.message || "Failed to update chat session",
         );
       }
 
-      return chatService.getSessionById(sessionId) as Promise<ChatSession>;
+      return response.data;
     } catch (error) {
       logger.error(`Error updating chat session ${sessionId}:`, error);
       throw new Error(`Failed to update chat session: ${error.message}`);
@@ -184,43 +158,21 @@ const chatService = {
     message: Omit<ChatMessage, "id" | "created_at">,
   ): Promise<ChatMessage> => {
     try {
-      const messageId = uuidv4();
-      const db = await getMySQLClient();
+      const response = await api.post<ChatMessage>("/chat/messages", {
+        sessionId: message.session_id,
+        content: message.content,
+        type: message.type,
+        userId: message.user_id || null,
+        metadata: message.metadata || null,
+      });
 
-      await db.query(
-        "INSERT INTO chat_messages (id, session_id, user_id, content, type, metadata, created_at) VALUES (?, ?, ?, ?, ?, ?, NOW())",
-        {
-          replacements: [
-            messageId,
-            message.session_id,
-            message.user_id || null,
-            message.content,
-            message.type,
-            message.metadata ? JSON.stringify(message.metadata) : null,
-          ],
-          type: QueryTypes.INSERT,
-        },
-      );
+      if (!response.success || !response.data) {
+        throw new Error(
+          response.error?.message || "Failed to add chat message",
+        );
+      }
 
-      // Update the session's updated_at timestamp
-      await db.query(
-        "UPDATE chat_sessions SET updated_at = NOW() WHERE id = ?",
-        {
-          replacements: [message.session_id],
-          type: QueryTypes.UPDATE,
-        },
-      );
-
-      // Fetch the created message
-      const messages = await db.query(
-        "SELECT * FROM chat_messages WHERE id = ?",
-        {
-          replacements: [messageId],
-          type: QueryTypes.SELECT,
-        },
-      );
-
-      return messages[0] as ChatMessage;
+      return response.data;
     } catch (error) {
       logger.error("Error adding chat message:", error);
       throw new Error(`Failed to add chat message: ${error.message}`);
@@ -232,16 +184,18 @@ const chatService = {
    */
   getMessagesBySessionId: async (sessionId: string): Promise<ChatMessage[]> => {
     try {
-      const db = await getMySQLClient();
-      const messages = await db.query(
-        "SELECT * FROM chat_messages WHERE session_id = ? ORDER BY created_at ASC",
-        {
-          replacements: [sessionId],
-          type: QueryTypes.SELECT,
-        },
-      );
+      const response = await api.get<{
+        messages: ChatMessage[];
+        hasMore: boolean;
+      }>(`/chat/sessions/${sessionId}/messages`);
 
-      return messages as ChatMessage[];
+      if (!response.success || !response.data) {
+        throw new Error(
+          response.error?.message || "Failed to fetch chat messages",
+        );
+      }
+
+      return response.data.messages || [];
     } catch (error) {
       logger.error(`Error fetching messages for session ${sessionId}:`, error);
       throw new Error(`Failed to fetch chat messages: ${error.message}`);
@@ -253,30 +207,15 @@ const chatService = {
    */
   deleteSession: async (sessionId: string): Promise<boolean> => {
     try {
-      const db = await getMySQLClient();
-      const transaction = await db.transaction();
+      const response = await api.delete<boolean>(`/chat/sessions/${sessionId}`);
 
-      try {
-        // Delete all messages for this session
-        await db.query("DELETE FROM chat_messages WHERE session_id = ?", {
-          replacements: [sessionId],
-          type: QueryTypes.DELETE,
-          transaction,
-        });
-
-        // Delete the session
-        await db.query("DELETE FROM chat_sessions WHERE id = ?", {
-          replacements: [sessionId],
-          type: QueryTypes.DELETE,
-          transaction,
-        });
-
-        await transaction.commit();
-        return true;
-      } catch (error) {
-        await transaction.rollback();
-        throw error;
+      if (!response.success) {
+        throw new Error(
+          response.error?.message || "Failed to delete chat session",
+        );
       }
+
+      return true;
     } catch (error) {
       logger.error(`Error deleting chat session ${sessionId}:`, error);
       throw new Error(`Failed to delete chat session: ${error.message}`);
