@@ -1,10 +1,9 @@
-import React from 'react';
-import ScrapingModule from '@/components/admin/scraping/ScrapingModule';
+import AlYalayisLandingPage from "@/pages/AlYalayisLandingPage";
 
-export default function ScrapingModuleDemo() {
+export default function AlYalayisLandingPageStoryboard() {
   return (
-    <div className="bg-white min-h-screen p-4">
-      <ScrapingModule />
+    <div className="bg-white min-h-screen">
+      <AlYalayisLandingPage />
     </div>
   );
 }

@@ -7,7 +7,7 @@
  */
 
 import axios, { AxiosRequestConfig, AxiosResponse, AxiosError } from "axios";
-import { env } from "@/server/config/env.ts";
+import { env } from "../../../server/config/env.ts";
 import logger from "@/utils/logger";
 import { getAuthToken, isTokenExpired } from "@/utils/auth";
 
