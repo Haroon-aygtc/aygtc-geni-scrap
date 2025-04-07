@@ -29,21 +29,51 @@ export interface WidgetConfig {
 export const widgetConfigService = {
   /**
    * Get the default active widget configuration
+   * If no default configuration exists, create one
    */
   getDefaultWidgetConfig: async (): Promise<WidgetConfig> => {
     try {
       const response = await api.get<WidgetConfig>("/widgets/default");
 
-      if (!response.success || !response.data) {
-        throw new Error(
-          response.error?.message || "No active widget configuration found",
-        );
+      if (response.success && response.data) {
+        return response.data;
       }
 
-      return response.data;
+      // No default configuration found, create one
+      logger.info("No default widget configuration found, creating one");
+
+      const defaultConfig: Omit<
+        WidgetConfig,
+        "id" | "createdAt" | "updatedAt"
+      > = {
+        initiallyOpen: false,
+        contextMode: "open",
+        contextName: "General",
+        title: "Chat Assistant",
+        primaryColor: "#6366f1",
+        position: "bottom-right",
+        showOnMobile: true,
+        isActive: true,
+        isDefault: true,
+      };
+
+      // Create a new default configuration
+      return await widgetConfigService.createWidgetConfig(defaultConfig);
     } catch (error) {
-      logger.error("Error fetching widget configuration", error);
-      throw error;
+      logger.error("Error fetching or creating widget configuration", error);
+
+      // Return a fallback configuration if API calls fail completely
+      return {
+        initiallyOpen: false,
+        contextMode: "open",
+        contextName: "General",
+        title: "Chat Assistant",
+        primaryColor: "#6366f1",
+        position: "bottom-right",
+        showOnMobile: true,
+        isActive: true,
+        isDefault: true,
+      };
     }
   },
 
