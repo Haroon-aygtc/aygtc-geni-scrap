@@ -4,7 +4,7 @@
  */
 
 import logger from "@/utils/logger";
-import { env } from "@/config/env";
+import { env } from "@/server/config/env";
 
 // Define QueryTypes for use in query operations
 export const QueryTypes = {

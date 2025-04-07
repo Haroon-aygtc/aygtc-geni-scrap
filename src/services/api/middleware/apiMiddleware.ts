@@ -7,7 +7,7 @@
  */
 
 import axios, { AxiosRequestConfig, AxiosResponse, AxiosError } from "axios";
-import { env } from "@/config/env";
+import { env } from "@/server/config/env";
 import logger from "@/utils/logger";
 import { getAuthToken, isTokenExpired } from "@/utils/auth";
 
