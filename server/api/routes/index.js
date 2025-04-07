@@ -19,6 +19,8 @@ import userRoutes from "./userRoutes.js";
 import widgetRoutes from "./widgetRoutes.js";
 import aiRoutes from "./aiRoutes.js";
 import responseFormattingRoutes from "./responseFormattingRoutes.js";
+import moderationRoutes from "./moderationRoutes.js";
+import notificationRoutes from "./notificationRoutes.js";
 import { authenticateJWT } from "../middleware/auth.js";
 
 const router = express.Router();
@@ -49,6 +51,8 @@ router.use("/users", authenticateJWT, userRoutes);
 router.use("/widget-configs", authenticateJWT, widgetRoutes);
 router.use("/ai", authenticateJWT, aiRoutes);
 router.use("/response-formatting", authenticateJWT, responseFormattingRoutes);
+router.use("/moderation", authenticateJWT, moderationRoutes);
+router.use("/notifications", authenticateJWT, notificationRoutes);
 
 // 404 handler for API routes
 router.use((req, res) => {

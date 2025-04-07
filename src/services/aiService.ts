@@ -1,6 +1,7 @@
 import logger from "@/utils/logger";
 import { api } from "./api/middleware/apiMiddleware";
 import { AIModelRequest, AIModelResponse } from "./ai/types";
+import { aiApi } from "./api";
 
 interface AIInteractionLogsParams {
   page: number;
@@ -53,11 +54,8 @@ const aiService = {
         additionalParams: options.additionalParams,
       };
 
-      // Use the API to generate a response
-      const response = await api.post<AIModelResponse>(
-        "/ai/generate",
-        modelRequest,
-      );
+      // Use the aiApi to generate a response
+      const response = await aiApi.generate(modelRequest);
 
       if (!response.success || !response.data) {
         throw new Error(
@@ -122,7 +120,7 @@ const aiService = {
     metadata?: Record<string, any>;
   }) => {
     try {
-      const response = await api.post<{ id: string }>("/ai/logs", data);
+      const response = await aiApi.logInteraction(data);
 
       if (!response.success) {
         logger.error("Error logging AI interaction:", response.error);
@@ -141,12 +139,7 @@ const aiService = {
    */
   getInteractionLogs: async (params: AIInteractionLogsParams) => {
     try {
-      const response = await api.get<{
-        logs: any[];
-        totalItems: number;
-        totalPages: number;
-        currentPage: number;
-      }>("/ai/logs", { params });
+      const response = await aiApi.getLogs(params);
 
       if (!response.success) {
         throw new Error(
@@ -178,13 +171,7 @@ const aiService = {
    */
   getAvailableModels: async () => {
     try {
-      const response = await api.get<
-        Array<{
-          id: string;
-          name: string;
-          provider: string;
-        }>
-      >("/ai/models");
+      const response = await aiApi.getModels();
 
       if (!response.success) {
         throw new Error(
@@ -204,9 +191,7 @@ const aiService = {
    */
   setDefaultModel: async (modelId: string) => {
     try {
-      const response = await api.post<boolean>("/ai/models/default", {
-        modelId,
-      });
+      const response = await aiApi.setDefaultModel(modelId);
 
       if (!response.success) {
         throw new Error(
@@ -226,11 +211,7 @@ const aiService = {
    */
   getDefaultModel: async () => {
     try {
-      const response = await api.get<{
-        id: string;
-        name: string;
-        provider: string;
-      }>("/ai/models/default");
+      const response = await aiApi.getDefaultModel();
 
       if (!response.success) {
         throw new Error(
@@ -250,12 +231,7 @@ const aiService = {
    */
   getModelPerformance: async (params: ModelPerformanceParams = {}) => {
     try {
-      const response = await api.get<{
-        modelUsage: any[];
-        avgResponseTimes: any[];
-        dailyUsage: any[];
-        timeRange: string;
-      }>("/ai/performance", { params });
+      const response = await aiApi.getPerformance(params.timeRange);
 
       if (!response.success) {
         throw new Error(
