@@ -36,6 +36,8 @@ export interface ModerationEvent {
   userId: string;
   content: string;
   ruleId: string;
+  ruleName?: string;
+  ruleType?: string;
   action: string;
   severity: string;
   createdAt: string;

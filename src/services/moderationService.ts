@@ -54,7 +54,7 @@ class ModerationService {
   /**
    * Get moderation rules
    */
-  async getRules(activeOnly = false): Promise<ModerationRule[]> {
+  async getRules(activeOnly = true): Promise<ModerationRule[]> {
     try {
       const response = await moderationApi.getModerationRules(activeOnly);
 
@@ -162,22 +162,15 @@ class ModerationService {
   async banUser(
     userId: string,
     reason: string,
-    bannedBy: string,
-    duration?: number,
+    adminId?: string,
+    expiresAt?: string,
   ): Promise<boolean> {
     try {
-      let expiresAt: string | undefined;
-
-      if (duration) {
-        const now = new Date();
-        expiresAt = new Date(now.getTime() + duration * 1000).toISOString();
-      }
-
       const response = await moderationApi.banUser(
         userId,
         reason,
         expiresAt,
-        bannedBy,
+        adminId,
       );
 
       if (!response.success) {
@@ -191,6 +184,53 @@ class ModerationService {
         error instanceof Error ? error : new Error(String(error)),
       );
       return false;
+    }
+  }
+
+  /**
+   * Unban a user
+   */
+  async unbanUser(userId: string, adminId?: string): Promise<boolean> {
+    try {
+      const response = await moderationApi.unbanUser(userId, adminId);
+
+      if (!response.success) {
+        throw new Error(response.error?.message || "Failed to unban user");
+      }
+
+      return true;
+    } catch (error) {
+      logger.error(
+        "Error unbanning user",
+        error instanceof Error ? error : new Error(String(error)),
+      );
+      return false;
+    }
+  }
+
+  /**
+   * Get moderation events
+   */
+  async getEvents(
+    limit: number = 50,
+    offset: number = 0,
+  ): Promise<{ events: ModerationEvent[]; totalCount: number }> {
+    try {
+      const response = await moderationApi.getModerationEvents(limit, offset);
+
+      if (!response.success) {
+        throw new Error(
+          response.error?.message || "Failed to get moderation events",
+        );
+      }
+
+      return response.data || { events: [], totalCount: 0 };
+    } catch (error) {
+      logger.error(
+        "Error fetching moderation events",
+        error instanceof Error ? error : new Error(String(error)),
+      );
+      return { events: [], totalCount: 0 };
     }
   }
 }

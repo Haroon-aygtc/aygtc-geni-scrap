@@ -5,6 +5,7 @@
  */
 
 import { api, ApiResponse } from "../middleware/apiMiddleware";
+import { notificationEndpoints } from "../endpoints";
 
 export interface Notification {
   id: string;
@@ -26,9 +27,12 @@ export const notificationApi = {
     limit: number = 5,
     includeRead: boolean = false,
   ): Promise<ApiResponse<Notification[]>> => {
-    return api.get<Notification[]>(`/notifications/user/${userId}`, {
-      params: { limit, read: includeRead },
-    });
+    return api.get<Notification[]>(
+      notificationEndpoints.getUserNotifications(userId),
+      {
+        params: { limit, read: includeRead },
+      },
+    );
   },
 
   /**
@@ -37,14 +41,16 @@ export const notificationApi = {
   markNotificationsAsRead: async (
     notificationIds: string[],
   ): Promise<ApiResponse<boolean>> => {
-    return api.put<boolean>("/notifications/mark-read", { notificationIds });
+    return api.put<boolean>(notificationEndpoints.markAsRead, {
+      notificationIds,
+    });
   },
 
   /**
    * Get a notification by ID
    */
   getNotification: async (id: string): Promise<ApiResponse<Notification>> => {
-    return api.get<Notification>(`/notifications/${id}`);
+    return api.get<Notification>(notificationEndpoints.getNotification(id));
   },
 
   /**
@@ -53,13 +59,16 @@ export const notificationApi = {
   createNotification: async (
     notification: Omit<Notification, "id" | "createdAt" | "isRead">,
   ): Promise<ApiResponse<Notification>> => {
-    return api.post<Notification>("/notifications", notification);
+    return api.post<Notification>(
+      notificationEndpoints.createNotification,
+      notification,
+    );
   },
 
   /**
    * Delete a notification
    */
   deleteNotification: async (id: string): Promise<ApiResponse<boolean>> => {
-    return api.delete<boolean>(`/notifications/${id}`);
+    return api.delete<boolean>(notificationEndpoints.deleteNotification(id));
   },
 };

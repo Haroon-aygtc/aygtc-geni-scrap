@@ -8,6 +8,7 @@
 import logger from "@/utils/logger";
 import websocketService from "./websocketService";
 import { api } from "./api/middleware/apiMiddleware";
+import { notificationEndpoints } from "./api/endpoints";
 
 type NotificationCallback = (notification: any) => void;
 type TableChangeCallback = (payload: any) => void;
@@ -209,9 +210,12 @@ export const realtimeService = {
     try {
       if (!userId) return [];
 
-      const response = await api.get<any[]>(`/notifications/user/${userId}`, {
-        params: { limit, read: false },
-      });
+      const response = await api.get<any[]>(
+        notificationEndpoints.getUserNotifications(userId),
+        {
+          params: { limit, read: false },
+        },
+      );
 
       if (!response.success) {
         throw new Error(
@@ -234,7 +238,7 @@ export const realtimeService = {
       if (notificationIds.length === 0) return true;
 
       const response = await api.put<{ success: boolean }>(
-        "/notifications/mark-read",
+        notificationEndpoints.markAsRead,
         { notificationIds },
       );
 

@@ -2,11 +2,11 @@
  * Moderation Controller
  *
  * This module provides controller functions for content moderation.
+ * Refactored to use the API layer instead of direct database access.
  */
 
-import { getMySQLClient, QueryTypes } from "../utils/dbHelpers.js";
-import { v4 as uuidv4 } from "uuid";
 import { formatResponse } from "../utils/responseFormatter.js";
+import { moderationApi } from "../services/api/features/moderation.js";
 
 /**
  * Check content against moderation rules
@@ -25,7 +25,14 @@ export const checkContent = async (req, res) => {
     }
 
     // Check if user is banned first
-    const isBanned = await isUserBannedHelper(userId);
+    const isBannedResponse = await moderationApi.isUserBanned(userId);
+    if (!isBannedResponse.success) {
+      throw new Error(
+        isBannedResponse.error?.message || "Failed to check if user is banned",
+      );
+    }
+
+    const isBanned = isBannedResponse.data;
     if (isBanned) {
       return res.json(
         formatResponse({
@@ -37,7 +44,14 @@ export const checkContent = async (req, res) => {
     }
 
     // Get active moderation rules
-    const rules = await getModerationRulesHelper(true);
+    const rulesResponse = await moderationApi.getModerationRules(true);
+    if (!rulesResponse.success) {
+      throw new Error(
+        rulesResponse.error?.message || "Failed to get moderation rules",
+      );
+    }
+
+    const rules = rulesResponse.data || [];
 
     // Default result
     let result = {
@@ -82,8 +96,8 @@ export const checkContent = async (req, res) => {
 
       // Handle match based on action
       if (matched) {
-        // Log the moderation event
-        await logModerationEventHelper({
+        // Log the moderation event using the API
+        await moderationApi.logModerationEvent({
           userId,
           content,
           ruleId: rule.id,
@@ -144,8 +158,14 @@ export const isUserBanned = async (req, res) => {
       );
     }
 
-    const isBanned = await isUserBannedHelper(userId);
-    return res.json(formatResponse(isBanned));
+    const response = await moderationApi.isUserBanned(userId);
+    if (!response.success) {
+      throw new Error(
+        response.error?.message || "Failed to check if user is banned",
+      );
+    }
+
+    return res.json(formatResponse(response.data));
   } catch (error) {
     console.error(`Error checking if user is banned`, error);
     return res.status(500).json(
@@ -174,21 +194,16 @@ export const banUser = async (req, res) => {
       );
     }
 
-    const sequelize = await getMySQLClient();
-    await sequelize.query(
-      `INSERT INTO user_bans (id, user_id, reason, admin_id, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)`,
-      {
-        replacements: [
-          uuidv4(),
-          userId,
-          reason,
-          adminId || req.user?.id || null,
-          new Date().toISOString(),
-          expiresAt || null,
-        ],
-        type: QueryTypes.INSERT,
-      },
+    const response = await moderationApi.banUser(
+      userId,
+      reason,
+      expiresAt,
+      adminId || req.user?.id || null,
     );
+
+    if (!response.success) {
+      throw new Error(response.error?.message || "Failed to ban user");
+    }
 
     return res.json(formatResponse(true));
   } catch (error) {
@@ -219,20 +234,14 @@ export const unbanUser = async (req, res) => {
       );
     }
 
-    const sequelize = await getMySQLClient();
-    await sequelize.query(
-      `UPDATE user_bans SET expires_at = ?, updated_by = ?, updated_at = ? WHERE user_id = ? AND expires_at > ?`,
-      {
-        replacements: [
-          new Date().toISOString(),
-          adminId || req.user?.id || null,
-          new Date().toISOString(),
-          userId,
-          new Date().toISOString(),
-        ],
-        type: QueryTypes.UPDATE,
-      },
+    const response = await moderationApi.unbanUser(
+      userId,
+      adminId || req.user?.id || null,
     );
+
+    if (!response.success) {
+      throw new Error(response.error?.message || "Failed to unban user");
+    }
 
     return res.json(formatResponse(true));
   } catch (error) {
@@ -252,10 +261,18 @@ export const unbanUser = async (req, res) => {
 export const getModerationRules = async (req, res) => {
   try {
     const { activeOnly } = req.query;
-    const rules = await getModerationRulesHelper(
+
+    const response = await moderationApi.getModerationRules(
       activeOnly === "true" || activeOnly === undefined,
     );
-    return res.json(formatResponse(rules));
+
+    if (!response.success) {
+      throw new Error(
+        response.error?.message || "Failed to get moderation rules",
+      );
+    }
+
+    return res.json(formatResponse(response.data));
   } catch (error) {
     console.error("Error getting moderation rules", error);
     return res.status(500).json(
@@ -292,56 +309,24 @@ export const createModerationRule = async (req, res) => {
       );
     }
 
-    const sequelize = await getMySQLClient();
-    const id = uuidv4();
-    const now = new Date().toISOString();
+    const response = await moderationApi.createModerationRule({
+      name,
+      description: description || null,
+      type,
+      pattern,
+      action,
+      replacement: replacement || null,
+      severity,
+      isActive: isActive !== undefined ? isActive : true,
+    });
 
-    await sequelize.query(
-      `INSERT INTO moderation_rules 
-       (id, name, description, type, pattern, action, replacement, severity, is_active, created_at, updated_at) 
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      {
-        replacements: [
-          id,
-          name,
-          description || null,
-          type,
-          pattern,
-          action,
-          replacement || null,
-          severity,
-          isActive !== undefined ? isActive : true,
-          now,
-          now,
-        ],
-        type: QueryTypes.INSERT,
-      },
-    );
+    if (!response.success || !response.data) {
+      throw new Error(
+        response.error?.message || "Failed to create moderation rule",
+      );
+    }
 
-    // Fetch the newly created rule
-    const [data] = await sequelize.query(
-      `SELECT * FROM moderation_rules WHERE id = ?`,
-      {
-        replacements: [id],
-        type: QueryTypes.SELECT,
-      },
-    );
-
-    return res.json(
-      formatResponse({
-        id: data.id,
-        name: data.name,
-        description: data.description,
-        type: data.type,
-        pattern: data.pattern,
-        action: data.action,
-        replacement: data.replacement,
-        severity: data.severity,
-        isActive: data.is_active,
-        createdAt: data.created_at,
-        updatedAt: data.updated_at,
-      }),
-    );
+    return res.json(formatResponse(response.data));
   } catch (error) {
     console.error("Error creating moderation rule", error);
     return res.status(500).json(
@@ -370,8 +355,6 @@ export const updateModerationRule = async (req, res) => {
       );
     }
 
-    const sequelize = await getMySQLClient();
-
     const updateData = {};
     if (updates.name !== undefined) updateData.name = updates.name;
     if (updates.description !== undefined)
@@ -382,56 +365,17 @@ export const updateModerationRule = async (req, res) => {
     if (updates.replacement !== undefined)
       updateData.replacement = updates.replacement;
     if (updates.severity !== undefined) updateData.severity = updates.severity;
-    if (updates.isActive !== undefined) updateData.is_active = updates.isActive;
-    updateData.updated_at = new Date().toISOString();
+    if (updates.isActive !== undefined) updateData.isActive = updates.isActive;
 
-    // Build the SET clause and replacements array
-    const setClause = Object.keys(updateData)
-      .map((key) => `${key} = ?`)
-      .join(", ");
-    const replacements = [...Object.values(updateData), id];
+    const response = await moderationApi.updateModerationRule(id, updateData);
 
-    await sequelize.query(
-      `UPDATE moderation_rules SET ${setClause} WHERE id = ?`,
-      {
-        replacements,
-        type: QueryTypes.UPDATE,
-      },
-    );
-
-    // Fetch the updated rule
-    const [data] = await sequelize.query(
-      `SELECT * FROM moderation_rules WHERE id = ?`,
-      {
-        replacements: [id],
-        type: QueryTypes.SELECT,
-      },
-    );
-
-    if (!data) {
-      return res.status(404).json(
-        formatResponse(null, {
-          message: "Moderation rule not found",
-          code: "ERR_404",
-        }),
+    if (!response.success || !response.data) {
+      throw new Error(
+        response.error?.message || "Failed to update moderation rule",
       );
     }
 
-    return res.json(
-      formatResponse({
-        id: data.id,
-        name: data.name,
-        description: data.description,
-        type: data.type,
-        pattern: data.pattern,
-        action: data.action,
-        replacement: data.replacement,
-        severity: data.severity,
-        isActive: data.is_active,
-        createdAt: data.created_at,
-        updatedAt: data.updated_at,
-      }),
-    );
+    return res.json(formatResponse(response.data));
   } catch (error) {
     console.error(`Error updating moderation rule`, error);
     return res.status(500).json(
@@ -459,11 +403,13 @@ export const deleteModerationRule = async (req, res) => {
       );
     }
 
-    const sequelize = await getMySQLClient();
-    await sequelize.query(`DELETE FROM moderation_rules WHERE id = ?`, {
-      replacements: [id],
-      type: QueryTypes.DELETE,
-    });
+    const response = await moderationApi.deleteModerationRule(id);
+
+    if (!response.success) {
+      throw new Error(
+        response.error?.message || "Failed to delete moderation rule",
+      );
+    }
 
     return res.json(formatResponse(true));
   } catch (error) {
@@ -484,47 +430,18 @@ export const getModerationEvents = async (req, res) => {
   try {
     const { limit = 50, offset = 0 } = req.query;
 
-    const sequelize = await getMySQLClient();
-
-    // Get total count
-    const [countResult] = await sequelize.query(
-      `SELECT COUNT(*) as total FROM moderation_events`,
-      {
-        type: QueryTypes.SELECT,
-      },
+    const response = await moderationApi.getModerationEvents(
+      parseInt(limit),
+      parseInt(offset),
     );
 
-    const totalCount = countResult.total;
+    if (!response.success) {
+      throw new Error(
+        response.error?.message || "Failed to get moderation events",
+      );
+    }
 
-    // Get events with pagination
-    const events = await sequelize.query(
-      `SELECT e.*, r.name as rule_name, r.type as rule_type 
-       FROM moderation_events e 
-       LEFT JOIN moderation_rules r ON e.rule_id = r.id 
-       ORDER BY e.created_at DESC 
-       LIMIT ? OFFSET ?`,
-      {
-        replacements: [parseInt(limit), parseInt(offset)],
-        type: QueryTypes.SELECT,
-      },
-    );
-
-    return res.json(
-      formatResponse({
-        events: events.map((event) => ({
-          id: event.id,
-          userId: event.user_id,
-          content: event.content,
-          ruleId: event.rule_id,
-          ruleName: event.rule_name,
-          ruleType: event.rule_type,
-          action: event.action,
-          severity: event.severity,
-          createdAt: event.created_at,
-        })),
-        totalCount,
-      }),
-    );
+    return res.json(formatResponse(response.data));
   } catch (error) {
     console.error("Error getting moderation events", error);
     return res.status(500).json(
@@ -535,95 +452,3 @@ export const getModerationEvents = async (req, res) => {
     );
   }
 };
-
-// Helper functions
-
-/**
- * Check if a user is banned (helper function)
- */
-async function isUserBannedHelper(userId) {
-  try {
-    if (!userId) return false;
-
-    const sequelize = await getMySQLClient();
-    const [data] = await sequelize.query(
-      `SELECT id FROM user_bans WHERE user_id = ? AND expires_at > ?`,
-      {
-        replacements: [userId, new Date().toISOString()],
-        type: QueryTypes.SELECT,
-      },
-    );
-
-    return !!data;
-  } catch (error) {
-    console.error(`Error checking if user ${userId} is banned`, error);
-    return false;
-  }
-}
-
-/**
- * Get all moderation rules (helper function)
- */
-async function getModerationRulesHelper(activeOnly = true) {
-  try {
-    const sequelize = await getMySQLClient();
-    let query = `SELECT * FROM moderation_rules ORDER BY severity DESC`;
-    let replacements = [];
-
-    if (activeOnly) {
-      query = `SELECT * FROM moderation_rules WHERE is_active = ? ORDER BY severity DESC`;
-      replacements = [true];
-    }
-
-    const data = await sequelize.query(query, {
-      replacements,
-      type: QueryTypes.SELECT,
-    });
-
-    return (data || []).map((rule) => ({
-      id: rule.id,
-      name: rule.name,
-      description: rule.description,
-      type: rule.type,
-      pattern: rule.pattern,
-      action: rule.action,
-      replacement: rule.replacement,
-      severity: rule.severity,
-      isActive: rule.is_active,
-      createdAt: rule.created_at,
-      updatedAt: rule.updated_at,
-    }));
-  } catch (error) {
-    console.error("Error getting moderation rules", error);
-    return [];
-  }
-}
-
-/**
- * Log a moderation event (helper function)
- */
-async function logModerationEventHelper(event) {
-  try {
-    const sequelize = await getMySQLClient();
-    await sequelize.query(
-      `INSERT INTO moderation_events 
-       (id, user_id, content, rule_id, action, severity, created_at) 
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      {
-        replacements: [
-          uuidv4(),
-          event.userId || null,
-          event.content,
-          event.ruleId,
-          event.action,
-          event.severity,
-          new Date().toISOString(),
-        ],
-        type: QueryTypes.INSERT,
-      },
-    );
-  } catch (error) {
-    console.error("Error logging moderation event", error);
-    // Don't throw - logging failures shouldn't break the application
-  }
-}
