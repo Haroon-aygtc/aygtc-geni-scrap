@@ -6,8 +6,9 @@
  */
 
 import logger from "@/utils/logger";
-import { getMySQLClient } from "./mysqlClient";
 import websocketService from "./websocketService";
+import { api } from "./api/middleware/apiMiddleware";
+import { notificationEndpoints } from "./api/endpoints";
 
 type NotificationCallback = (notification: any) => void;
 type TableChangeCallback = (payload: any) => void;
@@ -209,19 +210,20 @@ export const realtimeService = {
     try {
       if (!userId) return [];
 
-      const sequelize = await getMySQLClient();
-
-      const notifications = await sequelize.query(
-        `SELECT * FROM notifications 
-         WHERE user_id = ? AND read = false 
-         ORDER BY created_at DESC LIMIT ?`,
+      const response = await api.get<any[]>(
+        notificationEndpoints.getUserNotifications(userId),
         {
-          replacements: [userId, limit],
-          type: sequelize.QueryTypes.SELECT,
+          params: { limit, read: false },
         },
       );
 
-      return notifications || [];
+      if (!response.success) {
+        throw new Error(
+          response.error?.message || "Failed to fetch notifications",
+        );
+      }
+
+      return response.data || [];
     } catch (error) {
       logger.error("Error fetching notifications", error);
       return [];
@@ -235,18 +237,16 @@ export const realtimeService = {
     try {
       if (notificationIds.length === 0) return true;
 
-      const sequelize = await getMySQLClient();
-
-      // Build placeholders for the IN clause
-      const placeholders = notificationIds.map(() => "?").join(",");
-
-      await sequelize.query(
-        `UPDATE notifications SET read = true WHERE id IN (${placeholders})`,
-        {
-          replacements: [...notificationIds],
-          type: sequelize.QueryTypes.UPDATE,
-        },
+      const response = await api.put<{ success: boolean }>(
+        notificationEndpoints.markAsRead,
+        { notificationIds },
       );
+
+      if (!response.success) {
+        throw new Error(
+          response.error?.message || "Failed to mark notifications as read",
+        );
+      }
 
       return true;
     } catch (error) {

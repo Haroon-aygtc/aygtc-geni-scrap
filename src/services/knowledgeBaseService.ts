@@ -1,6 +1,6 @@
 import axios from "axios";
 import logger from "@/utils/logger";
-import { getMySQLClient } from "./mysqlClient";
+import { api } from "./api/middleware/apiMiddleware";
 import { v4 as uuidv4 } from "uuid";
 
 export interface KnowledgeBaseConfig {
@@ -46,13 +46,15 @@ class KnowledgeBaseService {
    */
   async getAllConfigs(): Promise<KnowledgeBaseConfig[]> {
     try {
-      const sequelize = await getMySQLClient();
-      const configs = await sequelize.query(
-        `SELECT * FROM knowledge_base_configs ORDER BY name`,
-        { type: sequelize.QueryTypes.SELECT },
-      );
+      const response = await api.get<KnowledgeBaseConfig[]>("/knowledge-bases");
 
-      return configs.map(this.mapConfigFromDb);
+      if (!response.success) {
+        throw new Error(
+          response.error?.message || "Failed to fetch knowledge base configs",
+        );
+      }
+
+      return response.data || [];
     } catch (error) {
       logger.error("Error fetching knowledge base configs", error);
       return [];
@@ -64,17 +66,20 @@ class KnowledgeBaseService {
    */
   async getConfigById(id: string): Promise<KnowledgeBaseConfig | null> {
     try {
-      const sequelize = await getMySQLClient();
-      const [config] = await sequelize.query(
-        `SELECT * FROM knowledge_base_configs WHERE id = ?`,
-        {
-          replacements: [id],
-          type: sequelize.QueryTypes.SELECT,
-        },
+      const response = await api.get<KnowledgeBaseConfig>(
+        `/knowledge-bases/${id}`,
       );
 
-      if (!config) return null;
-      return this.mapConfigFromDb(config);
+      if (!response.success) {
+        if (response.error?.code === "ERR_404") {
+          return null;
+        }
+        throw new Error(
+          response.error?.message || "Failed to fetch knowledge base config",
+        );
+      }
+
+      return response.data || null;
     } catch (error) {
       logger.error(`Error fetching knowledge base config with ID ${id}`, error);
       return null;
@@ -88,52 +93,18 @@ class KnowledgeBaseService {
     config: Omit<KnowledgeBaseConfig, "id" | "createdAt" | "updatedAt">,
   ): Promise<KnowledgeBaseConfig | null> {
     try {
-      const now = new Date().toISOString();
-      const id = uuidv4();
-      const newConfig = {
-        id,
-        ...config,
-        created_at: now,
-        updated_at: now,
-      };
-
-      const sequelize = await getMySQLClient();
-      const dbConfig = this.mapConfigToDb(newConfig);
-
-      await sequelize.query(
-        `INSERT INTO knowledge_base_configs 
-         (id, name, type, endpoint, api_key, connection_string, refresh_interval, 
-          last_synced_at, parameters, is_active, created_at, updated_at) 
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        {
-          replacements: [
-            id,
-            dbConfig.name,
-            dbConfig.type,
-            dbConfig.endpoint,
-            dbConfig.api_key,
-            dbConfig.connection_string,
-            dbConfig.refresh_interval,
-            dbConfig.last_synced_at,
-            JSON.stringify(dbConfig.parameters || {}),
-            dbConfig.is_active,
-            dbConfig.created_at,
-            dbConfig.updated_at,
-          ],
-          type: sequelize.QueryTypes.INSERT,
-        },
+      const response = await api.post<KnowledgeBaseConfig>(
+        "/knowledge-bases",
+        config,
       );
 
-      // Fetch the newly created config
-      const [createdConfig] = await sequelize.query(
-        `SELECT * FROM knowledge_base_configs WHERE id = ?`,
-        {
-          replacements: [id],
-          type: sequelize.QueryTypes.SELECT,
-        },
-      );
+      if (!response.success || !response.data) {
+        throw new Error(
+          response.error?.message || "Failed to create knowledge base config",
+        );
+      }
 
-      return this.mapConfigFromDb(createdConfig);
+      return response.data;
     } catch (error) {
       logger.error("Error creating knowledge base config", error);
       return null;
@@ -148,90 +119,18 @@ class KnowledgeBaseService {
     config: Partial<KnowledgeBaseConfig>,
   ): Promise<KnowledgeBaseConfig | null> {
     try {
-      const updateData = {
-        ...this.mapConfigToDb(config as KnowledgeBaseConfig),
-        updated_at: new Date().toISOString(),
-      };
+      const response = await api.put<KnowledgeBaseConfig>(
+        `/knowledge-bases/${id}`,
+        config,
+      );
 
-      const sequelize = await getMySQLClient();
-
-      // Build the update query dynamically
-      const updateFields = [];
-      const replacements = [];
-
-      if (updateData.name !== undefined) {
-        updateFields.push("name = ?");
-        replacements.push(updateData.name);
-      }
-
-      if (updateData.type !== undefined) {
-        updateFields.push("type = ?");
-        replacements.push(updateData.type);
-      }
-
-      if (updateData.endpoint !== undefined) {
-        updateFields.push("endpoint = ?");
-        replacements.push(updateData.endpoint);
-      }
-
-      if (updateData.api_key !== undefined) {
-        updateFields.push("api_key = ?");
-        replacements.push(updateData.api_key);
-      }
-
-      if (updateData.connection_string !== undefined) {
-        updateFields.push("connection_string = ?");
-        replacements.push(updateData.connection_string);
-      }
-
-      if (updateData.refresh_interval !== undefined) {
-        updateFields.push("refresh_interval = ?");
-        replacements.push(updateData.refresh_interval);
-      }
-
-      if (updateData.last_synced_at !== undefined) {
-        updateFields.push("last_synced_at = ?");
-        replacements.push(updateData.last_synced_at);
-      }
-
-      if (updateData.parameters !== undefined) {
-        updateFields.push("parameters = ?");
-        replacements.push(JSON.stringify(updateData.parameters));
-      }
-
-      if (updateData.is_active !== undefined) {
-        updateFields.push("is_active = ?");
-        replacements.push(updateData.is_active);
-      }
-
-      // Always update the updated_at timestamp
-      updateFields.push("updated_at = ?");
-      replacements.push(updateData.updated_at);
-
-      // Add the ID to the replacements
-      replacements.push(id);
-
-      if (updateFields.length > 0) {
-        await sequelize.query(
-          `UPDATE knowledge_base_configs SET ${updateFields.join(", ")} WHERE id = ?`,
-          {
-            replacements,
-            type: sequelize.QueryTypes.UPDATE,
-          },
+      if (!response.success || !response.data) {
+        throw new Error(
+          response.error?.message || "Failed to update knowledge base config",
         );
       }
 
-      // Fetch the updated config
-      const [updatedConfig] = await sequelize.query(
-        `SELECT * FROM knowledge_base_configs WHERE id = ?`,
-        {
-          replacements: [id],
-          type: sequelize.QueryTypes.SELECT,
-        },
-      );
-
-      if (!updatedConfig) return null;
-      return this.mapConfigFromDb(updatedConfig);
+      return response.data;
     } catch (error) {
       logger.error(`Error updating knowledge base config with ID ${id}`, error);
       return null;
@@ -243,12 +142,15 @@ class KnowledgeBaseService {
    */
   async deleteConfig(id: string): Promise<boolean> {
     try {
-      const sequelize = await getMySQLClient();
+      const response = await api.delete<{ success: boolean }>(
+        `/knowledge-bases/${id}`,
+      );
 
-      await sequelize.query(`DELETE FROM knowledge_base_configs WHERE id = ?`, {
-        replacements: [id],
-        type: sequelize.QueryTypes.DELETE,
-      });
+      if (!response.success) {
+        throw new Error(
+          response.error?.message || "Failed to delete knowledge base config",
+        );
+      }
 
       return true;
     } catch (error) {
@@ -298,46 +200,20 @@ class KnowledgeBaseService {
     contextRuleId?: string,
   ): Promise<KnowledgeBaseConfig[]> {
     try {
-      const sequelize = await getMySQLClient();
+      const endpoint = contextRuleId
+        ? `/context-rules/${contextRuleId}/knowledge-bases`
+        : "/knowledge-bases/active";
 
-      if (!contextRuleId) {
-        // If no context rule specified, get all active knowledge bases
-        const configs = await sequelize.query(
-          `SELECT * FROM knowledge_base_configs WHERE is_active = true`,
-          { type: sequelize.QueryTypes.SELECT },
+      const response = await api.get<KnowledgeBaseConfig[]>(endpoint);
+
+      if (!response.success) {
+        throw new Error(
+          response.error?.message ||
+            "Failed to fetch knowledge bases for context rule",
         );
-
-        return configs.map(this.mapConfigFromDb);
       }
 
-      // Get knowledge bases linked to the context rule
-      const linkedKbs = await sequelize.query(
-        `SELECT knowledge_base_id FROM context_rule_knowledge_bases WHERE context_rule_id = ?`,
-        {
-          replacements: [contextRuleId],
-          type: sequelize.QueryTypes.SELECT,
-        },
-      );
-
-      if (linkedKbs.length === 0) {
-        return [];
-      }
-
-      // Get the actual knowledge base configs
-      const kbIds = linkedKbs.map((item: any) => item.knowledge_base_id);
-
-      // Build the IN clause safely
-      const placeholders = kbIds.map(() => "?").join(",");
-
-      const configs = await sequelize.query(
-        `SELECT * FROM knowledge_base_configs WHERE id IN (${placeholders}) AND is_active = true`,
-        {
-          replacements: [...kbIds],
-          type: sequelize.QueryTypes.SELECT,
-        },
-      );
-
-      return configs.map(this.mapConfigFromDb);
+      return response.data || [];
     } catch (error) {
       logger.error("Error getting knowledge bases for context rule", error);
       return [];
@@ -458,29 +334,32 @@ class KnowledgeBaseService {
         return cachedResult;
       }
 
-      // In a production environment, you would:
-      // 1. Parse the connection string to determine the database type
-      // 2. Establish a connection to the database
-      // 3. Execute a query based on the params.query
-      // 4. Transform the results to QueryResult format
-
-      // For now, we'll use a direct MySQL query if the connection string is a MySQL URL
-      if (kb.connectionString.includes("mysql")) {
+      // Use the API to query the database based on the connection string
+      if (kb.connectionString) {
         try {
           // Extract table name from parameters
           const tableName = kb.parameters?.table || "documents";
           const searchColumn = kb.parameters?.searchColumn || "content";
 
-          const sequelize = await getMySQLClient();
-
-          // Use MATCH AGAINST for full-text search if available, otherwise fallback to LIKE
-          const data = await sequelize.query(
-            `SELECT * FROM ${tableName} WHERE ${searchColumn} LIKE ? LIMIT ?`,
+          // Use the API to query the database
+          const response = await api.post<any[]>(
+            `/knowledge-bases/query-database`,
             {
-              replacements: [`%${params.query}%`, params.limit || 5],
-              type: sequelize.QueryTypes.SELECT,
+              connectionString: kb.connectionString,
+              tableName,
+              searchColumn,
+              query: params.query,
+              limit: params.limit || 5,
             },
           );
+
+          if (!response.success) {
+            throw new Error(
+              response.error?.message || "Failed to query database",
+            );
+          }
+
+          const data = response.data || [];
 
           if (data && data.length > 0) {
             const results: QueryResult[] = data.map((item) => ({
@@ -866,66 +745,22 @@ class KnowledgeBaseService {
     return cached.data;
   }
 
-  /**
-   * Map database object to KnowledgeBaseConfig
-   */
-  private mapConfigFromDb(data: any): KnowledgeBaseConfig {
-    return {
-      id: data.id,
-      name: data.name,
-      type: data.type,
-      endpoint: data.endpoint,
-      apiKey: data.api_key,
-      connectionString: data.connection_string,
-      refreshInterval: data.refresh_interval,
-      lastSyncedAt: data.last_synced_at,
-      parameters: data.parameters,
-      isActive: data.is_active,
-      createdAt: data.created_at,
-      updatedAt: data.updated_at,
-    };
-  }
-
-  /**
-   * Map KnowledgeBaseConfig to database object
-   */
-  private mapConfigToDb(config: Partial<KnowledgeBaseConfig>): any {
-    const dbObject: any = {};
-
-    if (config.id !== undefined) dbObject.id = config.id;
-    if (config.name !== undefined) dbObject.name = config.name;
-    if (config.type !== undefined) dbObject.type = config.type;
-    if (config.endpoint !== undefined) dbObject.endpoint = config.endpoint;
-    if (config.apiKey !== undefined) dbObject.api_key = config.apiKey;
-    if (config.connectionString !== undefined)
-      dbObject.connection_string = config.connectionString;
-    if (config.refreshInterval !== undefined)
-      dbObject.refresh_interval = config.refreshInterval;
-    if (config.lastSyncedAt !== undefined)
-      dbObject.last_synced_at = config.lastSyncedAt;
-    if (config.parameters !== undefined)
-      dbObject.parameters = config.parameters;
-    if (config.isActive !== undefined) dbObject.is_active = config.isActive;
-    if (config.createdAt !== undefined) dbObject.created_at = config.createdAt;
-    if (config.updatedAt !== undefined) dbObject.updated_at = config.updatedAt;
-
-    return dbObject;
-  }
+  // API layer handles all data transformation between frontend and backend
 
   /**
    * Sync a knowledge base to update its content
    */
   async syncKnowledgeBase(id: string): Promise<boolean> {
     try {
-      const kb = await this.getConfigById(id);
-      if (!kb) {
-        throw new Error(`Knowledge base with ID ${id} not found`);
-      }
+      const response = await api.post<{ success: boolean }>(
+        `/knowledge-bases/${id}/sync`,
+      );
 
-      // Update the last synced timestamp
-      await this.updateConfig(id, {
-        lastSyncedAt: new Date().toISOString(),
-      } as Partial<KnowledgeBaseConfig>);
+      if (!response.success) {
+        throw new Error(
+          response.error?.message || `Failed to sync knowledge base ${id}`,
+        );
+      }
 
       // Clear cache entries for this knowledge base
       this.clearCacheForKnowledgeBase(id);
@@ -959,25 +794,14 @@ class KnowledgeBaseService {
     results: number;
   }): Promise<void> {
     try {
-      const sequelize = await getMySQLClient();
-
-      await sequelize.query(
-        `INSERT INTO knowledge_base_query_logs 
-         (id, user_id, query, context_rule_id, knowledge_base_ids, results_count, created_at) 
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        {
-          replacements: [
-            uuidv4(),
-            params.userId,
-            params.query,
-            params.contextRuleId || null,
-            params.knowledgeBaseIds.join(","),
-            params.results,
-            new Date().toISOString(),
-          ],
-          type: sequelize.QueryTypes.INSERT,
-        },
+      const response = await api.post<{ success: boolean }>(
+        "/knowledge-bases/log-query",
+        params,
       );
+
+      if (!response.success) {
+        logger.warn("Failed to log knowledge base query", response.error);
+      }
     } catch (error) {
       logger.error("Error logging knowledge base query", error);
     }

@@ -284,12 +284,10 @@ router.post("/", authMiddleware, async (req, res) => {
     await transaction.commit();
 
     // Return the created config
-    res
-      .status(201)
-      .json({
-        id: configId,
-        message: "Follow-up configuration created successfully",
-      });
+    res.status(201).json({
+      id: configId,
+      message: "Follow-up configuration created successfully",
+    });
   } catch (error) {
     await transaction.rollback();
     console.error("Error creating follow-up config:", error);

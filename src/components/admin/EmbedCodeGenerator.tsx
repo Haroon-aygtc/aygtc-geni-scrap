@@ -126,6 +126,8 @@ const EmbedCodeGenerator = ({
     }
   }, [realtimeConfig, toast]);
 
+  // Get the base URL from the current window location
+  // In production, this should be the public-facing URL of your application
   const baseUrl = window.location.origin;
 
   // Generate iframe embed code
@@ -143,23 +145,38 @@ const EmbedCodeGenerator = ({
       params.append("contextRuleId", selectedContextRuleId);
     }
 
+    // Calculate dimensions based on widget size
+    const width =
+      widgetSize === "small" ? "300" : widgetSize === "medium" ? "380" : "450";
+    const height = "600";
+
+    // Position styling
+    const verticalPosition = widgetPosition.includes("bottom")
+      ? "bottom: 20px;"
+      : "top: 20px;";
+    const horizontalPosition = widgetPosition.includes("right")
+      ? "right: 20px;"
+      : "left: 20px;";
+
     return `<iframe 
   src="${url}?${params.toString()}" 
-  width="${widgetSize === "small" ? "300" : widgetSize === "medium" ? "380" : "450"}" 
-  height="600" 
-  style="border: none; position: fixed; ${widgetPosition.includes("bottom") ? "bottom: 20px;" : "top: 20px;"} ${widgetPosition.includes("right") ? "right: 20px;" : "left: 20px;"} z-index: 9999; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15); border-radius: 12px; background-color: white;"
+  width="${width}" 
+  height="${height}" 
+  style="border: none; position: fixed; ${verticalPosition} ${horizontalPosition} z-index: 9999; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15); border-radius: 12px; background-color: white;"
   title="Chat Widget"
 ></iframe>`;
   };
 
   // Generate Web Component (Shadow DOM) embed code
   const generateWebComponentCode = () => {
+    // Build attributes string with all necessary configuration
     let attributes = `widget-id="${widgetId}" position="${widgetPosition}" color="${widgetColor}" size="${widgetSize}" context-mode="${contextMode}"`;
 
     if (contextMode === "business" && selectedContextRuleId) {
       attributes += ` context-rule-id="${selectedContextRuleId}"`;
     }
 
+    // Include the script tag to load the web component and the custom element
     return `<script src="${baseUrl}/chat-widget.js"></script>
 <chat-widget ${attributes}></chat-widget>`;
   };

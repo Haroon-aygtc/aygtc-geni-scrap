@@ -2,12 +2,14 @@ import React, { useState, useEffect, useRef } from "react";
 import ChatHeader from "./ChatHeader";
 import ChatMessages from "./ChatMessages";
 import ChatInput from "./ChatInput";
+import GuestUserForm from "./GuestUserForm";
 import { Button } from "@/components/ui/button";
 import { MessageSquare, X } from "lucide-react";
 import { useToast } from "@/components/ui/use-toast";
 import { chatService } from "@/services/chatService";
 import { useAuth } from "@/context/AuthContext";
 import { useWebSocket } from "@/hooks/useWebSocket";
+import guestUserService from "@/services/guestUserService";
 
 interface ChatWidgetProps {
   config?: any;
@@ -25,6 +27,14 @@ interface Message {
   status?: "sending" | "sent" | "error";
 }
 
+interface GuestUser {
+  id: string;
+  fullName: string;
+  phoneNumber: string;
+  email?: string;
+  sessionToken?: string;
+}
+
 const ChatWidget: React.FC<ChatWidgetProps> = ({
   config,
   previewMode = false,
@@ -36,6 +46,9 @@ const ChatWidget: React.FC<ChatWidgetProps> = ({
   const [messages, setMessages] = useState<Message[]>([]);
   const [isTyping, setIsTyping] = useState(false);
   const [sessionId, setSessionId] = useState<string | null>(null);
+  const [guestUser, setGuestUser] = useState<GuestUser | null>(null);
+  const [showGuestForm, setShowGuestForm] = useState(false);
+  const [isGuestFormLoading, setIsGuestFormLoading] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const { toast } = useToast();
   const { user } = useAuth();
@@ -69,24 +82,55 @@ const ChatWidget: React.FC<ChatWidgetProps> = ({
 
   const loadWidgetConfig = async () => {
     try {
-      // Load widget configuration from the server
-      const response = await fetch(`/api/widget/${widgetId}/config`);
+      // Load widget configuration from the server (public endpoint)
+      const response = await fetch(`/api/public/widget/${widgetId}/config`);
       if (response.ok) {
         const data = await response.json();
-        // Update the widget configuration
-        // This would be handled by the parent component in a real implementation
+        if (data.success && data.data) {
+          // Update the widget configuration with the fetched data
+          const fetchedConfig = data.data;
+          const mergedConfig = { ...defaultConfig, ...fetchedConfig.settings };
+          // Update the widget configuration
+          Object.keys(mergedConfig).forEach((key) => {
+            if (widgetConfig[key] !== undefined) {
+              widgetConfig[key] = mergedConfig[key];
+            }
+          });
+        }
       }
     } catch (error) {
       console.error("Error loading widget configuration:", error);
     }
   };
 
-  // Initialize chat session
+  // Check for existing guest session in localStorage
   useEffect(() => {
-    if (isOpen) {
+    if (isOpen && !previewMode) {
+      const storedGuestSession = localStorage.getItem("guestSession");
+      if (storedGuestSession) {
+        try {
+          const parsedSession = JSON.parse(storedGuestSession);
+          if (parsedSession && parsedSession.sessionToken) {
+            validateGuestSession(parsedSession.sessionToken);
+          } else {
+            setShowGuestForm(true);
+          }
+        } catch (error) {
+          console.error("Error parsing stored guest session:", error);
+          setShowGuestForm(true);
+        }
+      } else if (!user) {
+        // No stored session and no authenticated user
+        setShowGuestForm(true);
+      } else {
+        // User is authenticated, initialize chat session
+        initChatSession();
+      }
+    } else if (isOpen && previewMode) {
+      // In preview mode, just initialize the chat
       initChatSession();
     }
-  }, [isOpen]);
+  }, [isOpen, user]);
 
   // Handle WebSocket messages
   useEffect(() => {
@@ -116,6 +160,92 @@ const ChatWidget: React.FC<ChatWidgetProps> = ({
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  };
+
+  // Validate guest session token
+  const validateGuestSession = async (sessionToken: string) => {
+    try {
+      const response =
+        await guestUserService.getGuestUserBySession(sessionToken);
+
+      if (response.success && response.data) {
+        setGuestUser({
+          ...response.data,
+          sessionToken,
+        });
+        // Now that we have a valid guest user, initialize the chat
+        initChatSession();
+      } else {
+        // Invalid or expired session
+        localStorage.removeItem("guestSession");
+        setShowGuestForm(true);
+      }
+    } catch (error) {
+      console.error("Error validating guest session:", error);
+      localStorage.removeItem("guestSession");
+      setShowGuestForm(true);
+    }
+  };
+
+  // Handle guest form submission
+  const handleGuestFormSubmit = async (data: {
+    fullName: string;
+    phoneNumber: string;
+    email?: string;
+  }) => {
+    setIsGuestFormLoading(true);
+    try {
+      const response = await guestUserService.createGuestUser({
+        fullName: data.fullName,
+        phoneNumber: data.phoneNumber,
+        email: data.email,
+      });
+
+      if (response.success && response.data) {
+        const { user, session } = response.data;
+
+        // Store session in localStorage
+        localStorage.setItem(
+          "guestSession",
+          JSON.stringify({
+            guestId: user.id,
+            sessionToken: session.sessionToken,
+            expiresAt: session.expiresAt,
+          }),
+        );
+
+        // Update state
+        setGuestUser({
+          id: user.id,
+          fullName: user.fullName,
+          phoneNumber: user.phoneNumber,
+          email: user.email,
+          sessionToken: session.sessionToken,
+        });
+
+        // Hide form and initialize chat
+        setShowGuestForm(false);
+        initChatSession();
+
+        // Log activity
+        await guestUserService.logGuestActivity(user.id, "chat_started", {
+          widgetId,
+        });
+      } else {
+        throw new Error(
+          response.error?.message || "Failed to register guest user",
+        );
+      }
+    } catch (error) {
+      console.error("Error registering guest user:", error);
+      toast({
+        title: "Error",
+        description: "Failed to register. Please try again.",
+        variant: "destructive",
+      });
+    } finally {
+      setIsGuestFormLoading(false);
+    }
   };
 
   const initChatSession = async () => {
@@ -161,6 +291,15 @@ const ChatWidget: React.FC<ChatWidgetProps> = ({
             timestamp: new Date(),
           },
         ]);
+      }
+
+      // Log activity if guest user
+      if (guestUser) {
+        await guestUserService.logGuestActivity(
+          guestUser.id,
+          "chat_session_created",
+          { sessionId: session.id },
+        );
       }
     } catch (error) {
       console.error("Error initializing chat session:", error);
@@ -229,6 +368,14 @@ const ChatWidget: React.FC<ChatWidgetProps> = ({
       // Show typing indicator
       setIsTyping(true);
 
+      // Log activity if guest user
+      if (guestUser) {
+        await guestUserService.logGuestActivity(guestUser.id, "message_sent", {
+          messageContent:
+            content.substring(0, 100) + (content.length > 100 ? "..." : ""),
+        });
+      }
+
       // Send the message via WebSocket
       if (connected && sessionId) {
         sendMessage({
@@ -236,20 +383,61 @@ const ChatWidget: React.FC<ChatWidgetProps> = ({
           sessionId,
           content,
           role: "user",
+          guestId: guestUser?.id, // Include guest ID if available
         });
       } else {
         // Fallback to REST API if WebSocket is not connected
-        const response = await chatService.sendMessage(sessionId!, content);
-        setIsTyping(false);
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: response.id,
-            content: response.content,
-            role: "assistant",
-            timestamp: new Date(response.timestamp),
-          },
-        ]);
+        // For public widget, use the public endpoint
+        let response;
+        if (embedded && widgetId) {
+          // Use public endpoint for embedded widget
+          const publicResponse = await fetch(
+            `/api/public/widget/${widgetId}/chat`,
+            {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+              },
+              body: JSON.stringify({
+                message: content,
+                sessionId,
+                guestId: guestUser?.id, // Include guest ID if available
+              }),
+            },
+          );
+
+          if (publicResponse.ok) {
+            const data = await publicResponse.json();
+            if (data.success) {
+              response = data.data;
+            }
+          }
+        } else {
+          // Use authenticated endpoint for logged-in users
+          response = await chatService.sendMessage(sessionId!, content);
+        }
+
+        if (response) {
+          setIsTyping(false);
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: response.messageId || response.id,
+              content: response.content,
+              role: "assistant",
+              timestamp: new Date(response.timestamp),
+            },
+          ]);
+
+          // Log activity if guest user
+          if (guestUser) {
+            await guestUserService.logGuestActivity(
+              guestUser.id,
+              "received_response",
+              { responseId: response.messageId || response.id },
+            );
+          }
+        }
       }
     } catch (error) {
       console.error("Error sending message:", error);
@@ -302,18 +490,29 @@ const ChatWidget: React.FC<ChatWidgetProps> = ({
           onClose={onClose}
           primaryColor={widgetConfig.primaryColor}
         />
-        <ChatMessages
-          messages={messages}
-          isTyping={isTyping}
-          allowFeedback={widgetConfig.allowFeedback}
-          messagesEndRef={messagesEndRef}
-        />
-        <ChatInput
-          onSendMessage={handleSendMessage}
-          placeholder={widgetConfig.placeholderText}
-          allowAttachments={widgetConfig.allowAttachments}
-          primaryColor={widgetConfig.primaryColor}
-        />
+        {showGuestForm ? (
+          <div className="flex-1 overflow-auto p-4 flex items-center justify-center">
+            <GuestUserForm
+              onSubmit={handleGuestFormSubmit}
+              isLoading={isGuestFormLoading}
+            />
+          </div>
+        ) : (
+          <>
+            <ChatMessages
+              messages={messages}
+              isTyping={isTyping}
+              allowFeedback={widgetConfig.allowFeedback}
+              messagesEndRef={messagesEndRef}
+            />
+            <ChatInput
+              onSendMessage={handleSendMessage}
+              placeholder={widgetConfig.placeholderText}
+              allowAttachments={widgetConfig.allowAttachments}
+              primaryColor={widgetConfig.primaryColor}
+            />
+          </>
+        )}
         {widgetConfig.showBranding && (
           <div className="text-center py-2 text-xs text-gray-500">
             Powered by ChatAdmin
@@ -337,18 +536,29 @@ const ChatWidget: React.FC<ChatWidgetProps> = ({
             onClose={toggleChat}
             primaryColor={widgetConfig.primaryColor}
           />
-          <ChatMessages
-            messages={messages}
-            isTyping={isTyping}
-            allowFeedback={widgetConfig.allowFeedback}
-            messagesEndRef={messagesEndRef}
-          />
-          <ChatInput
-            onSendMessage={handleSendMessage}
-            placeholder={widgetConfig.placeholderText}
-            allowAttachments={widgetConfig.allowAttachments}
-            primaryColor={widgetConfig.primaryColor}
-          />
+          {showGuestForm ? (
+            <div className="flex-1 overflow-auto p-4 flex items-center justify-center">
+              <GuestUserForm
+                onSubmit={handleGuestFormSubmit}
+                isLoading={isGuestFormLoading}
+              />
+            </div>
+          ) : (
+            <>
+              <ChatMessages
+                messages={messages}
+                isTyping={isTyping}
+                allowFeedback={widgetConfig.allowFeedback}
+                messagesEndRef={messagesEndRef}
+              />
+              <ChatInput
+                onSendMessage={handleSendMessage}
+                placeholder={widgetConfig.placeholderText}
+                allowAttachments={widgetConfig.allowAttachments}
+                primaryColor={widgetConfig.primaryColor}
+              />
+            </>
+          )}
           {widgetConfig.showBranding && (
             <div className="text-center py-2 text-xs text-gray-500">
               Powered by ChatAdmin

@@ -11,6 +11,7 @@ import { useAuth } from "@/context/AuthContext";
 import { useWebSocket } from "@/hooks/useWebSocket";
 import { FollowUpConfig } from "@/components/admin/FollowUpQuestionsConfig";
 import { ResponseFormattingConfig } from "@/components/admin/ResponseFormattingOptions";
+import widgetConfigService from "@/services/widgetConfigService";
 
 interface ChatWidgetWithConfigProps {
   config?: any;
@@ -45,6 +46,7 @@ const ChatWidgetWithConfig: React.FC<ChatWidgetWithConfigProps> = ({
   const [isTyping, setIsTyping] = useState(false);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [isConfigLoaded, setIsConfigLoaded] = useState(false);
+  const [loadedConfig, setLoadedConfig] = useState<any>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const { toast } = useToast();
   const { user } = useAuth();
@@ -75,7 +77,11 @@ const ChatWidgetWithConfig: React.FC<ChatWidgetWithConfigProps> = ({
   };
 
   // Merge provided config with defaults
-  const widgetConfig = { ...defaultConfig, ...config };
+  const widgetConfig = {
+    ...defaultConfig,
+    ...(config || {}),
+    ...(loadedConfig || {}),
+  };
 
   // Handle WebSocket connection errors
   useEffect(() => {
@@ -95,15 +101,57 @@ const ChatWidgetWithConfig: React.FC<ChatWidgetWithConfigProps> = ({
     const loadWidgetConfig = async () => {
       if (widgetId && !previewMode) {
         try {
-          const response = await fetch(`/api/widget/${widgetId}/config`);
-          if (response.ok) {
-            const data = await response.json();
-            // This would update the config in a real implementation
-            // For now, we just mark it as loaded
+          // First try to get the config from the widgetConfigService
+          let configData;
+          try {
+            if (widgetId === "default") {
+              configData = await widgetConfigService.getDefaultWidgetConfig();
+            } else {
+              // This would be implemented to get a specific widget config by ID
+              const response = await fetch(`/api/widget/${widgetId}/config`);
+              if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+              }
+              configData = await response.json();
+            }
+
+            // Update the widget config with the loaded data
+            if (configData) {
+              // Merge with defaults to ensure all required fields exist
+              setLoadedConfig(configData);
+            }
+
             setIsConfigLoaded(true);
+          } catch (serviceError) {
+            console.error(
+              "Error loading widget configuration from service:",
+              serviceError,
+            );
+
+            // Fallback to direct API call if service fails
+            const response = await fetch(`/api/widget/${widgetId}/config`);
+            if (response.ok) {
+              configData = await response.json();
+              // Update the config state
+              setLoadedConfig(configData);
+              setIsConfigLoaded(true);
+            } else {
+              throw new Error(
+                `Failed to load widget configuration: ${response.statusText}`,
+              );
+            }
           }
         } catch (error) {
           console.error("Error loading widget configuration:", error);
+
+          // Show toast notification with error
+          toast({
+            title: "Configuration Error",
+            description:
+              "Failed to load widget configuration. Using default settings.",
+            variant: "destructive",
+          });
+
           // Still mark as loaded to continue with defaults
           setIsConfigLoaded(true);
         }
@@ -114,7 +162,7 @@ const ChatWidgetWithConfig: React.FC<ChatWidgetWithConfigProps> = ({
     };
 
     loadWidgetConfig();
-  }, [widgetId, previewMode]);
+  }, [widgetId, previewMode, toast]);
 
   // Initialize chat session
   useEffect(() => {

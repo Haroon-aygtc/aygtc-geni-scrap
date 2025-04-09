@@ -47,6 +47,7 @@ export default defineConfig({
     preserveSymlinks: true,
     alias: {
       "@": path.resolve(__dirname, "./src"),
+      "@/server": path.resolve(__dirname, "./server"),
       buffer: "buffer/",
       stream: "stream-browserify",
       util: "util/",

@@ -11,6 +11,7 @@ import ChatEmbedPage from "../pages/chat-embed";
 import ProtectedRoute from "../components/auth/ProtectedRoute";
 import AdminRoute from "../components/auth/AdminRoute";
 import AdminLayout from "@/components/admin/layout/AdminLayout";
+import AlYalayisLandingPage from "@/pages/AlYalayisLandingPage";
 
 // Lazy-loaded admin components
 const Dashboard = lazy(() => import("../pages/admin/dashboard"));
@@ -80,7 +81,8 @@ const AppRoutes = () => {
       {/* Tempo routes */}
       {tempoRoutes}
       <Routes>
-        <Route path="/" element={<Home />} />
+        <Route path="/" element={<AlYalayisLandingPage />} />
+        <Route path="/home" element={<Home />} />
         <Route path="/login" element={<LoginPage />} />
         <Route path="/signup" element={<SignupPage />} />
         <Route path="/forgot-password" element={<ForgotPasswordPage />} />

@@ -1,76 +1,63 @@
 /**
- * MySQL Client
- *
- * This file provides a singleton instance of the Sequelize client for MySQL.
- * It handles connection pooling and reconnection automatically.
+ * MySQL Client Service
+ * Provides a singleton instance for database connection and operations
  */
 
 // Import Sequelize using named imports instead of default import
 import { Sequelize, DataTypes, QueryTypes } from "sequelize";
-import dbConfig from "../config/database.js";
-import logger from "../utils/logger";
+import dotenv from "dotenv";
+import path from "path";
+
+// Simple logger implementation to avoid dependency on external logger
+const logger = {
+  info: (message) => console.info(`[INFO] ${message}`),
+  error: (message, error) => console.error(`[ERROR] ${message}`, error),
+  debug: (message) => console.debug(`[DEBUG] ${message}`),
+  warn: (message) => console.warn(`[WARN] ${message}`),
+};
+
+dotenv.config();
 
 let sequelizeInstance = null;
 
 /**
- * Get a MySQL client instance
- * @returns {Promise<Sequelize>} A Sequelize instance
+ * Get MySQL client singleton instance
+ * @returns {Sequelize} Sequelize instance
  */
-export const getMySQLClient = async () => {
+export const getMySQLClient = () => {
   if (sequelizeInstance) {
     return sequelizeInstance;
   }
 
   try {
-    // Get the current environment
-    const env = process.env.NODE_ENV || "development";
-    const config = dbConfig[env];
+    const host = process.env.DB_HOST || "localhost";
+    const port = parseInt(process.env.DB_PORT || "3306", 10);
+    const database = process.env.DB_NAME || "chat_system";
+    const username = process.env.DB_USER || "root";
+    const password = process.env.DB_PASSWORD || "";
 
-    if (!config) {
-      throw new Error(
-        `Database configuration for environment '${env}' not found`,
-      );
-    }
+    logger.info(`Connecting to MySQL database at ${host}:${port}/${database}`);
 
-    // Create a new Sequelize instance
-    sequelizeInstance = new Sequelize(
-      config.database,
-      config.username,
-      config.password,
-      {
-        host: config.host,
-        port: config.port,
-        dialect: "mysql",
-        logging: config.logging ? (msg) => logger.debug(msg) : false,
-        pool: config.pool,
-        dialectOptions: config.dialectOptions,
-        define: {
-          timestamps: true,
-          underscored: true,
-          createdAt: "created_at",
-          updatedAt: "updated_at",
-        },
-        retry: {
-          max: 5,
-          match: [
-            /SequelizeConnectionError/,
-            /SequelizeConnectionRefusedError/,
-            /SequelizeHostNotFoundError/,
-            /SequelizeHostNotReachableError/,
-            /SequelizeInvalidConnectionError/,
-            /SequelizeConnectionTimedOutError/,
-          ],
-        },
+    sequelizeInstance = new Sequelize(database, username, password, {
+      host,
+      port,
+      dialect: "mysql",
+      logging: (msg) => logger.debug(msg),
+      pool: {
+        max: 10,
+        min: 0,
+        acquire: 30000,
+        idle: 10000,
       },
-    );
-
-    // Test the connection
-    await sequelizeInstance.authenticate();
-    logger.info("MySQL connection has been established successfully.");
+      define: {
+        timestamps: true,
+        underscored: true,
+      },
+    });
 
     return sequelizeInstance;
   } catch (error) {
-    logger.error("Unable to connect to the MySQL database:", error);
+    logger.error("Error creating MySQL connection", error);
     throw error;
   }
 };
@@ -80,34 +67,40 @@ export const getMySQLClient = async () => {
  */
 export const closeMySQLConnection = async () => {
   if (sequelizeInstance) {
-    await sequelizeInstance.close();
-    sequelizeInstance = null;
-    logger.info("MySQL connection closed.");
+    try {
+      await sequelizeInstance.close();
+      sequelizeInstance = null;
+      logger.info("MySQL connection closed");
+    } catch (error) {
+      logger.error("Error closing MySQL connection", error);
+      throw error;
+    }
   }
 };
 
 /**
  * Execute a raw SQL query
- * @param {string} sql - The SQL query to execute
+ * @param {string} sql - SQL query to execute
  * @param {Object} options - Query options
  * @returns {Promise<any>} Query results
  */
 export const executeRawQuery = async (sql, options = {}) => {
-  const sequelize = await getMySQLClient();
+  const client = getMySQLClient();
   try {
-    return await sequelize.query(sql, {
-      type: options.type || QueryTypes.SELECT,
+    const queryType = options.type || QueryTypes.SELECT;
+    const result = await client.query(sql, {
+      type: queryType,
       replacements: options.replacements || {},
-      ...options,
+      plain: options.plain || false,
+      raw: options.raw !== undefined ? options.raw : true,
+      transaction: options.transaction,
     });
+    return result;
   } catch (error) {
-    logger.error(`Error executing raw query: ${sql}`, error);
+    logger.error(`Error executing SQL query: ${sql}`, error);
     throw error;
   }
 };
 
-// Export Sequelize types for convenience
-export { DataTypes, QueryTypes };
-
-// Export default for compatibility
-export default getMySQLClient;
+// Export the getMySQLClient function as both named and default export
+export { getMySQLClient as default };

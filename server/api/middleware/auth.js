@@ -7,12 +7,17 @@
 import jwt from "jsonwebtoken";
 import { User } from "../../../src/models/index.js";
 
-// JWT secret from environment variables
-const JWT_SECRET =
-  process.env.JWT_SECRET || "your-secret-key-change-this-in-production";
+// Import shared JWT secret
+import { JWT_SECRET } from "./authenticateWebSocket.js";
 
 /**
  * Authenticate JWT token middleware
+ */
+/**
+ * Authenticate JWT token middleware for HTTP requests
+ * @param {Object} req - Express request object
+ * @param {Object} res - Express response object
+ * @param {Function} next - Express next function
  */
 export const authenticateJWT = async (req, res, next) => {
   try {
@@ -105,6 +110,11 @@ export const authenticateJWT = async (req, res, next) => {
 /**
  * Check if user has required role
  */
+/**
+ * Middleware to check if user has required role
+ * @param {string|string[]} roles - Required role(s)
+ * @returns {Function} - Express middleware function
+ */
 export const requireRole = (roles) => {
   return (req, res, next) => {
     if (!req.user) {
@@ -142,6 +152,11 @@ export const requireRole = (roles) => {
 
 /**
  * Generate JWT token for a user
+ */
+/**
+ * Generate JWT token for a user
+ * @param {Object} user - User object with id, email, and role
+ * @returns {string} - JWT token
  */
 export const generateToken = (user) => {
   return jwt.sign(
