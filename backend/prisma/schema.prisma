@@ -1,0 +1,252 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id            String   @id @default(uuid())
+  email         String   @unique
+  passwordHash  String
+  fullName      String?
+  role          String   @default("user")
+  isActive      Boolean  @default(true)
+  emailVerified Boolean  @default(false)
+  avatarUrl     String?
+  metadata      Json?
+  lastLoginAt   DateTime?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  activities    UserActivity[]
+  followUpConfigs FollowUpConfig[]
+  chatSessions  ChatSession[]
+  widgetConfigs WidgetConfig[]
+  apiKeys       ApiKey[]
+  knowledgeBaseEntries KnowledgeBaseEntry[]
+  scrapingJobs  ScrapingJob[]
+  responseFormattingConfigs ResponseFormattingConfig[]
+  scrapingSelectors ScrapingSelector[]
+  analyticsLogs AnalyticsLog[]
+  monitoringLogs MonitoringLog[]
+}
+
+model UserActivity {
+  id         String   @id @default(uuid())
+  userId     String
+  action     String
+  ipAddress  String?
+  userAgent  String?
+  metadata   Json?
+  createdAt  DateTime @default(now())
+
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model FollowUpConfig {
+  id                     String                 @id @default(uuid())
+  userId                 String
+  name                   String
+  enableFollowUpQuestions Boolean               @default(true)
+  maxFollowUpQuestions   Int                    @default(3)
+  showFollowUpAs         String                 @default("buttons")
+  generateAutomatically  Boolean                @default(true)
+  isDefault              Boolean                @default(false)
+  createdAt              DateTime               @default(now())
+  updatedAt              DateTime               @updatedAt
+
+  user                   User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  predefinedQuestionSets PredefinedQuestionSet[]
+  topicBasedQuestionSets TopicBasedQuestionSet[]
+}
+
+model PredefinedQuestionSet {
+  id            String   @id @default(uuid())
+  configId      String
+  name          String
+  description   String?
+  triggerKeywords Json
+  questions     Json
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  config        FollowUpConfig @relation(fields: [configId], references: [id], onDelete: Cascade)
+}
+
+model TopicBasedQuestionSet {
+  id          String   @id @default(uuid())
+  configId    String
+  topic       String
+  questions   Json
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  config      FollowUpConfig @relation(fields: [configId], references: [id], onDelete: Cascade)
+}
+
+model PromptTemplate {
+  id            String   @id @default(uuid())
+  name          String
+  description   String?
+  templateText  String
+  variables     Json
+  category      String   @default("general")
+  isActive      Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
+
+model AICache {
+  id          String   @id @default(uuid())
+  promptHash  String
+  prompt      String
+  response    String
+  modelUsed   String
+  metadata    Json?
+  createdAt   DateTime @default(now())
+  expiresAt   DateTime
+}
+
+model ChatSession {
+  id          String   @id @default(uuid())
+  userId      String
+  status      String   @default("active")
+  contextRuleId String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  messages    ChatMessage[]
+}
+
+model ChatMessage {
+  id          String   @id @default(uuid())
+  sessionId   String
+  sender      String
+  content     String
+  modelUsed   String?
+  metadata    Json?
+  createdAt   DateTime @default(now())
+
+  session     ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+}
+
+model WidgetConfig {
+  id          String   @id @default(uuid())
+  userId      String
+  name        String
+  settings    Json
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model ApiKey {
+  id          String   @id @default(uuid())
+  userId      String
+  name        String
+  key         String
+  provider    String
+  lastUsedAt  DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model KnowledgeBaseEntry {
+  id          String   @id @default(uuid())
+  userId      String
+  title       String
+  content     String
+  category    String?
+  tags        Json
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model ModerationRule {
+  id          String   @id @default(uuid())
+  name        String
+  description String?
+  pattern     String
+  action      String
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model ScrapingJob {
+  id          String   @id @default(uuid())
+  userId      String
+  url         String
+  status      String   @default("pending")
+  result      Json?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model ResponseFormattingConfig {
+  id          String   @id @default(uuid())
+  userId      String
+  name        String
+  rules       Json
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model ScrapingSelector {
+  id          String   @id @default(uuid())
+  userId      String
+  name        String
+  description String?
+  config      Json
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  scrapingData ScrapingData[]
+}
+
+model ScrapingData {
+  id          String   @id @default(uuid())
+  selectorId  String
+  url         String
+  data        Json
+  status      String   @default("pending")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  selector    ScrapingSelector @relation(fields: [selectorId], references: [id], onDelete: Cascade)
+}
+
+model AnalyticsLog {
+  id          String   @id @default(uuid())
+  userId      String
+  eventType   String
+  details     Json
+  createdAt   DateTime @default(now())
+
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model MonitoringLog {
+  id          String   @id @default(uuid())
+  userId      String
+  type        String
+  message     String
+  details     Json?
+  createdAt   DateTime @default(now())
+
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
